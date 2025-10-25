@@ -45,7 +45,10 @@ class Goal(BaseModel):
     description: str
     target_date: str  # ISO format date string
     created_at: Optional[str] = None
-    status: Optional[str] = "active"  # active, completed, failed
+    status: Optional[str] = "active"  # active, resolved
+    payout_amount: int = 100
+    outcome: Optional[str] = None  # success, failure, null if unresolved
+    base_price: Optional[float] = None
 
 class DailyTask(BaseModel):
     id: Optional[int] = None
@@ -61,17 +64,9 @@ class Agent(BaseModel):
     token_balance: int = 100
     created_at: Optional[str] = None
 
-class Contract(BaseModel):
-    id: Optional[int] = None
-    goal_id: int
-    created_at: Optional[str] = None
-    status: Optional[str] = "active"  # active, resolved
-    payout_amount: int = 100
-    outcome: Optional[str] = None  # success, failure, null if unresolved
-
 class Trade(BaseModel):
     id: Optional[int] = None
-    contract_id: int
+    goal_id: int
     buyer_agent_id: int
     seller_agent_id: int
     tokens_exchanged: int
@@ -115,34 +110,22 @@ def get_agent(agent_id: int) -> Optional[Agent]:
         return None
     return Agent(**json.loads(data))
 
-def get_contract(contract_id: int) -> Optional[Contract]:
-    """Fetch contract from Redis"""
-    data = redis_client.get(f"contract:{contract_id}")
-    if not data:
-        return None
-    return Contract(**json.loads(data))
-
 def save_agent(agent: Agent):
     """Save agent to Redis"""
     redis_client.set(f"agent:{agent.id}", json.dumps(agent.model_dump()))
     redis_client.sadd("agents:all", agent.id)
 
-def save_contract(contract: Contract):
-    """Save contract to Redis"""
-    redis_client.set(f"contract:{contract.id}", json.dumps(contract.model_dump()))
-    redis_client.sadd("contracts:all", contract.id)
+def save_goal(goal: Goal):
+    """Save goal to Redis"""
+    redis_client.set(f"goal:{goal.id}", json.dumps(goal.model_dump()))
+    redis_client.sadd("goals:all", goal.id)
 
-def estimate_contract_base_price(contract_id: int):
-    """Estimate base price for a contract by querying LLM 3 times with context and averaging"""
-    # Fetch contract and goal details
-    contract = get_contract(contract_id)
-    if not contract:
-        print(f"Contract {contract_id} not found")
-        return
-
-    goal = get_goal(contract.goal_id)
+def estimate_contract_base_price(goal_id: int):
+    """Estimate base price for a goal by querying LLM 3 times with context and averaging"""
+    # Fetch goal details
+    goal = get_goal(goal_id)
     if not goal:
-        print(f"Goal {contract.goal_id} not found")
+        print(f"Goal {goal_id} not found")
         return
 
     # Calculate days left
@@ -201,13 +184,14 @@ Reply with your chain of thought reasoning, then end with ONLY an XML tag with t
 
     if prices:
         average_price = sum(prices) / len(prices)
-        redis_client.set(f"contract:{contract_id}:base_price", json.dumps({"price": average_price, "days_left": days_left}))
-        print(f"Set base price for contract {contract_id}: ${average_price:.2f} (based on {len(prices)} estimates)")
+        goal.base_price = average_price
+        save_goal(goal)
+        print(f"Set base price for goal {goal_id}: ${average_price:.2f} (based on {len(prices)} estimates)")
 
 # Endpoints
 @app.post("/goals")
-def create_goal(request: CreateGoalRequest, background_tasks: BackgroundTasks) -> dict:
-    """Create a new goal with a target date in DD/MM/YYYY format and a contract"""
+def create_goal(request: CreateGoalRequest, background_tasks: BackgroundTasks) -> Goal:
+    """Create a new goal with a target date in DD/MM/YYYY format"""
     # Convert DD/MM/YYYY to ISO format for storage
     target_date_obj = datetime.strptime(request.date, "%d/%m/%Y")
     target_date_iso = target_date_obj.date().isoformat()
@@ -223,25 +207,12 @@ def create_goal(request: CreateGoalRequest, background_tasks: BackgroundTasks) -
     )
 
     # Save goal to Redis
-    redis_client.set(f"goal:{goal_id}", json.dumps(goal.model_dump()))
-    redis_client.sadd("goals:all", goal_id)
+    save_goal(goal)
 
-    # Create contract for the goal
-    contract_id = get_next_id("contract:id")
-    contract = Contract(
-        id=contract_id,
-        goal_id=goal_id,
-        created_at=serialize_datetime(),
-        status="active"
-    )
+    # Estimate base price for goal in background
+    background_tasks.add_task(estimate_contract_base_price, goal_id)
 
-    # Save contract to Redis
-    save_contract(contract)
-
-    # Estimate base price for contract in background
-    background_tasks.add_task(estimate_contract_base_price, contract_id)
-
-    return {"goal": goal, "contract": contract}
+    return goal
 
 @app.get("/goals")
 def list_goals() -> List[Goal]:
@@ -257,6 +228,14 @@ def list_goals() -> List[Goal]:
             goals.append(goal)
 
     return sorted(goals, key=lambda g: g.id)
+
+@app.get("/goals/{goal_id}")
+def get_goal_by_id(goal_id: int) -> Goal:
+    """Retrieve a specific goal by ID"""
+    goal = get_goal(goal_id)
+    if not goal:
+        raise HTTPException(status_code=404, detail="Goal not found")
+    return goal
 
 if __name__ == "__main__":
     import uvicorn
