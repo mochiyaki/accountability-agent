@@ -402,7 +402,7 @@ def conduct_debate_round(goal_id: int, update_id: int, round_number: int, agents
             for msg in prev_messages:
                 agent = get_agent(msg.agent_id)
                 agent_name = agent.name if agent else f"Agent {msg.agent_id}"
-                prev_round_context += f"- {agent_name}: {msg.content[:200]}...\n"
+                prev_round_context += f"- {agent_name}: {msg.content}\n"
 
     # Each agent generates their analysis
     messages_this_round = []
@@ -465,7 +465,7 @@ def get_agent_spreads(goal_id: int, update_id: int, agents: List[Agent]) -> List
     for msg in debate_messages:
         agent = get_agent(msg.agent_id)
         agent_name = agent.name if agent else f"Agent {msg.agent_id}"
-        debate_summary += f"Round {msg.round_number} - {agent_name}: {msg.content[:150]}...\n"
+        debate_summary += f"Round {msg.round_number} - {agent_name}: {msg.content}\n"
 
     for agent in agents:
         prompt = f"""You are {agent.name}. After the following debate about a goal:
@@ -637,8 +637,8 @@ def create_goal(request: CreateGoalRequest, background_tasks: BackgroundTasks) -
     # Save goal to Redis
     save_goal(goal)
 
-    # Estimate base price for goal in background
-    background_tasks.add_task(estimate_contract_base_price, goal_id)
+    # Trigger market auction for goal creation (treat as update_id=0)
+    background_tasks.add_task(conduct_auction, goal_id, 0, 3, 2)
 
     return goal
 
@@ -666,7 +666,7 @@ def get_goal_by_id(goal_id: int) -> Goal:
     return goal
 
 @app.post("/goals/{goal_id}/updates")
-def create_goal_update(goal_id: int, request: CreateGoalUpdateRequest) -> GoalUpdate:
+def create_goal_update(goal_id: int, request: CreateGoalUpdateRequest, background_tasks: BackgroundTasks) -> GoalUpdate:
     """Submit an update for a goal"""
     # Verify goal exists
     goal = get_goal(goal_id)
@@ -685,6 +685,9 @@ def create_goal_update(goal_id: int, request: CreateGoalUpdateRequest) -> GoalUp
 
     # Save update to Redis
     save_goal_update(update)
+
+    # Trigger market auction for goal update
+    background_tasks.add_task(conduct_auction, goal_id, update_id, 3, 2)
 
     return update
 
