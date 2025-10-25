@@ -2,6 +2,8 @@
 - set the goal🎯, measure📏 and end time⌛
 - our lovely agents 🐷🐯🐻🐱🐮 will help you to track your progress and give you constructive comments and rewards!
 
+![banner](./banner.png)
+
 ## Purpose
 This program helps you `set personal goals, track your progress, and visualize how well you are doing over time`. Think of it as a combination of a digital journal, contract system, and progress tracker.
 
