@@ -263,6 +263,72 @@ def match_orders(spreads: List[AgentSpread]) -> List[tuple]:
 
     return trades
 
+def auction_fallback(spreads: List[AgentSpread]) -> List[tuple]:
+    """
+    Fallback auction when order book doesn't converge (for initial market seeding).
+    Uses clearing price algorithm: find price that maximizes trade volume.
+
+    Algorithm:
+    - For each possible price point between min sell and max buy
+    - Count how many buyers and sellers would trade at that price
+    - Pick the price that clears the most volume
+    - Execute all trades at that clearing price
+    """
+    if len(spreads) < 2:
+        return []
+
+    buy_prices = [s.buy_price for s in spreads]
+    sell_prices = [s.sell_price for s in spreads]
+
+    highest_buy = max(buy_prices)
+    lowest_sell = min(sell_prices)
+
+    # If spreads overlap, regular matching should have worked
+    if highest_buy >= lowest_sell:
+        return []
+
+    print(f"  Spreads don't converge: highest_buy=${highest_buy:.2f} < lowest_sell=${lowest_sell:.2f}")
+    print(f"  Running auction fallback to discover clearing price...")
+
+    # Try prices from lowest_sell down to highest_buy in 5 cent increments
+    best_price = None
+    best_volume = 0
+
+    price = lowest_sell
+    while price >= highest_buy - 0.01:  # Small buffer
+        # Count buyers willing to buy at this price and sellers willing to sell
+        buyers_at_price = [s for s in spreads if s.buy_price >= price]
+        sellers_at_price = [s for s in spreads if s.sell_price <= price]
+
+        # Volume is min of buyers and sellers (pairing constraint)
+        volume = min(len(buyers_at_price), len(sellers_at_price))
+
+        if volume > best_volume:
+            best_volume = volume
+            best_price = price
+
+        price -= 0.05
+
+    if best_price is None or best_volume == 0:
+        print(f"  Could not find clearing price")
+        return []
+
+    print(f"  Clearing price discovered: ${best_price:.2f} (volume: {best_volume} tokens)")
+
+    # Execute trades at clearing price
+    buyers = sorted([s for s in spreads if s.buy_price >= best_price],
+                   key=lambda s: s.buy_price, reverse=True)
+    sellers = sorted([s for s in spreads if s.sell_price <= best_price],
+                    key=lambda s: s.sell_price)
+
+    trades = []
+    for i in range(min(len(buyers), len(sellers))):
+        trade = (buyers[i].agent_id, sellers[i].agent_id, best_price, 1.0)
+        trades.append(trade)
+        print(f"    Agent {buyers[i].agent_id} buys from Agent {sellers[i].agent_id} @ ${best_price:.2f}")
+
+    return trades
+
 def settle_trades(goal_id: int, trades: List[tuple]):
     """
     Settle trades by updating agent cash and token holdings in Redis.
@@ -624,11 +690,19 @@ def conduct_auction(goal_id: int, update_id: int = 0, num_agents: int = 3, num_r
     trades = match_orders(spreads)
     print(f"Found {len(trades)} trades to execute")
 
+    # If no trades and this is round 0 (initial goal creation), use auction fallback
+    if not trades and update_id == 0:
+        print("No trades converged. Running auction fallback for market seeding...")
+        trades = auction_fallback(spreads)
+        print(f"Auction fallback produced {len(trades)} trades")
+
     # Settlement
     if trades:
         print("Settling trades...")
         settle_trades(goal_id, trades)
         print("Trades settled successfully")
+    else:
+        print("No trades to settle")
 
     print(f"=== Auction Complete for Goal #{goal_id} ===\n")
 
