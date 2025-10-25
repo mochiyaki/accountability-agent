@@ -2,6 +2,7 @@ import json
 import redis
 import os
 import re
+import requests
 from concurrent.futures import ThreadPoolExecutor
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, BackgroundTasks
@@ -9,7 +10,6 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, field_validator, AfterValidator
 from typing import List, Optional, Annotated
 from datetime import datetime, date
-from openai import OpenAI
 
 def validate_iso_date(v: str) -> str:
     """Validate that a string is a valid ISO format date (YYYY-MM-DD)"""
@@ -42,12 +42,6 @@ redis_client = redis.Redis(
     username=os.getenv('REDIS_USERNAME'),
     password=os.getenv('REDIS_PASSWORD'),
     decode_responses=True
-)
-
-# OpenAI client for OpenRouter
-llm_client = OpenAI(
-    base_url="https://openrouter.ai/api/v1",
-    api_key=os.getenv("OPENROUTER_API_KEY"),
 )
 
 # Data models
@@ -171,22 +165,31 @@ def get_goal_updates(goal_id: int) -> List[GoalUpdate]:
 def _call_llm_for_price(prompt: str) -> Optional[float]:
     """Make a single LLM call to estimate price. Returns the price or None if extraction fails."""
     try:
-        completion = llm_client.chat.completions.create(
-            extra_headers={
-                "HTTP-Referer": "http://localhost:8000",
-                "X-Title": "Accountability Agent",
+        headers = {
+            "Authorization": f"Bearer {os.getenv('OPENROUTER_API_KEY')}",
+            "HTTP-Referer": "http://localhost:8000",
+            "X-Title": "Accountability Agent",
+            "Content-Type": "application/json",
+        }
+
+        response = requests.post(
+            "https://openrouter.ai/api/v1/chat/completions",
+            headers=headers,
+            json={
+                "model": "deepseek/deepseek-r1",
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": prompt,
+                    }
+                ],
             },
-            model="openai/gpt-5-mini",
-            messages=[
-                {
-                    "role": "user",
-                    "content": prompt,
-                }
-            ],
         )
 
-        response = completion.choices[0].message.content
-        match = re.search(r'<price>([\d.]+)</price>', response)
+        response.raise_for_status()
+        data = response.json()
+        message_content = data["choices"][0]["message"]["content"]
+        match = re.search(r'<price>([\d.]+)</price>', message_content)
         if match:
             price = float(match.group(1))
             print(f"Estimated price: ${price}")
