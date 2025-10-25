@@ -699,12 +699,27 @@ def conduct_auction(goal_id: int, update_id: int = 0, num_agents: int = 3, num_r
         print(f"Auction fallback produced {len(trades)} trades", flush=True)
 
     # Settlement
+    market_price = None
     if trades:
         print("Settling trades...", flush=True)
         settle_trades(goal_id, trades)
         print("Trades settled successfully", flush=True)
+
+        # Calculate market price from executed trades
+        trade_prices = [trade[2] for trade in trades]  # trade[2] is price_per_token
+        if trade_prices:
+            market_price = sum(trade_prices) / len(trade_prices)
+            print(f"Market price discovered: ${market_price:.2f}", flush=True)
     else:
         print("No trades to settle", flush=True)
+
+    # Update goal with market price
+    if market_price is not None:
+        goal_obj = get_goal(goal_id)
+        if goal_obj:
+            goal_obj.base_price = market_price
+            save_goal(goal_obj)
+            print(f"Updated goal {goal_id} base_price to ${market_price:.2f}", flush=True)
 
     print(f"=== Auction Complete for Goal #{goal_id} ===\n", flush=True)
 
