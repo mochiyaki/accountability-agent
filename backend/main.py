@@ -131,6 +131,9 @@ class CreateAgentRequest(BaseModel):
     name: str
     cash_balance: float = 1000.0
 
+class ResolveGoalRequest(BaseModel):
+    outcome: str  # "success" or "failure"
+
 # Helper functions for Redis operations
 def get_next_id(key: str) -> int:
     """Get next ID for a resource"""
@@ -565,19 +568,48 @@ def _process_agent_analysis(agent_id: int, agent_name: str, goal_id: int, update
         timestamp=serialize_datetime()
     )
 
+    # Extract the analysis part (everything before <buy> tag)
+    analysis_match = re.search(r'^(.*?)(?=<buy>|$)', response, re.DOTALL)
+    if analysis_match:
+        analysis_text = analysis_match.group(1).strip()
+        # Save agent's analysis for this goal
+        agent = get_agent(agent_id)
+        if agent:
+            agent.analyses[str(goal_id)] = analysis_text
+            save_agent(agent)
+
     # Extract bid/ask prices from the response
     buy_match = re.search(r'<buy>\$?([\d.]+)</buy>', response)
     sell_match = re.search(r'<sell>\$?([\d.]+)</sell>', response)
 
     spread = None
-    if buy_match and sell_match:
+    is_auction = update_id == 0
+
+    if buy_match:
         buy_price = float(buy_match.group(1))
-        sell_price = float(sell_match.group(1))
-        spread = AgentSpread(
-            agent_id=agent_id,
-            buy_price=buy_price,
-            sell_price=sell_price
-        )
+
+        # Validate spreads based on agent's cash balance
+        agent = get_agent(agent_id)
+        if agent:
+            # Agent can't bid more per token than their total cash (can't afford even 1 token)
+            if buy_price > agent.cash_balance:
+                print(f"  Warning: Agent {agent_id} buy_price (${buy_price:.2f}) exceeds cash (${agent.cash_balance:.2f}). Capping to ${agent.cash_balance:.2f}.", flush=True)
+                buy_price = agent.cash_balance
+
+        # In auction (update_id=0), only buy price is needed; in trading rounds, both are needed
+        if is_auction:
+            spread = AgentSpread(
+                agent_id=agent_id,
+                buy_price=buy_price,
+                sell_price=0  # Not applicable in auction
+            )
+        elif sell_match:
+            sell_price = float(sell_match.group(1))
+            spread = AgentSpread(
+                agent_id=agent_id,
+                buy_price=buy_price,
+                sell_price=sell_price
+            )
 
     return debate_msg, spread
 
@@ -605,40 +637,116 @@ def conduct_debate_round(goal_id: int, update_id: int, agents: List[Agent]) -> t
             updates_context += f"- {update.date}: {update.content}\n"
         updates_context += "\n"
 
+    # Get the relevant date: update date if this is an update, otherwise today
+    if update_id == 0:
+        current_date = datetime.now().date().isoformat()
+    else:
+        update = get_goal_update(update_id)
+        current_date = update.date if update else datetime.now().date().isoformat()
+
     # Build prompts for all agents
     agent_prompts = []
     for agent in agents:
-        # Get agent's history for context
-        agent_history = get_agent_history(agent.id, limit=5)
-        history_context = ""
-        if agent_history:
-            history_context = "Your recent prediction history:\n"
-            for i, entry in enumerate(agent_history, 1):
-                goal_ref = f"Goal #{entry['goal_id']}"
-                pred_range = f"${entry['buy_price']:.2f}-${entry['sell_price']:.2f}"
-                market = f"${entry['market_price']:.2f}" if entry['market_price'] else "pending"
-                history_context += f"  {i}. {goal_ref}: You predicted {pred_range}, market price was {market}\n"
-            history_context += "\n"
+        # Calculate agent's net worth across all positions
+        cash = agent.cash_balance
+        total_liabilities = 0
+        total_assets = 0
+        long_positions = []
+        short_positions = []
 
-        # Get agent's previous analysis if exists
+        for goal_id_str, tokens in agent.token_holdings.items():
+            if tokens > 0:
+                # Long position = asset (worth $100/token at 100% success)
+                total_assets += tokens * 100
+                long_positions.append(f"Goal #{goal_id_str}: +{int(tokens)} tokens (${tokens * 100:.2f})")
+            elif tokens < 0:
+                # Short position = liability (owes $100/token at 100% failure)
+                liability = abs(tokens) * 100
+                total_liabilities += liability
+                short_positions.append(f"Goal #{goal_id_str}: {int(tokens)} tokens (-${liability:.2f})")
+
+        net_worth = cash + total_assets - total_liabilities
+
+        # Get agent's current token position for this goal
+        token_position = agent.token_holdings.get(str(goal_id), 0)
+
+        # Build position strings
+        long_str = "\n  ".join(long_positions) if long_positions else "None"
+        short_str = "\n  ".join(short_positions) if short_positions else "None"
+
+        position_info = f"""PORTFOLIO:
+- Cash: ${cash:.2f}
+- Long Tokens (across all goals):
+  {long_str}
+  Total: ${total_assets:.2f}
+- Short Token Liabilities (across all goals):
+  {short_str}
+  Total: -${total_liabilities:.2f}
+- Net Worth: ${net_worth:.2f}
+
+Current Position (this goal): {int(token_position)} tokens"""
+
+        # Get agent's previous analysis on THIS GOAL if exists
         agent_prev_analysis = agent.analyses.get(str(goal_id), "")
         prev_analysis_context = f"Your previous analysis on this goal: {agent_prev_analysis}\n\n" if agent_prev_analysis else ""
 
-        prompt = f"""You are {agent.name}, an AI analyzing a goal for a prediction market.
+        # Determine if this is an auction round or a trading round
+        is_auction = update_id == 0
+        goal = get_goal(goal_id)
 
-{goal_context}
-
-{updates_context}{history_context}{prev_analysis_context}Your task: Provide an independent analysis of whether this goal will be achieved, then post your bid/ask prices.
+        if is_auction:
+            market_context = """AUCTION ROUND (Initial Price Discovery):
+This is the first round. Submit your bid price to discover the market price.
+The highest bids set the clearing price - no one is forced to sell."""
+            task_description = """Your task: Provide an independent analysis of whether this goal will be achieved, then submit your bid price.
 
 First, provide your analysis (2-3 sentences on probability of success, key risks, time remaining).
 
-Then, based on your analysis, provide your bid/ask prices for success tokens:
-- Buy price: Maximum you'd pay per token (probability * $100)
-- Sell price: Minimum you'd accept per token
+Then, submit your bid price for success tokens - the maximum you'd pay per token:
+- Buy price: Maximum you'd pay per token (you profit if success probability > price/$100)
 
-Reply with your analysis, then ONLY:
+The clearing price will be set to the highest bid received."""
+        else:
+            market_info = ""
+            if goal and goal.base_price is not None:
+                market_info = f"\nCurrent market price: ${goal.base_price:.2f}"
+            market_context = f"""TRADING ROUND (Market Update):
+This is a follow-up trading round. A market price has been established.{market_info}
+You can buy at your bid price or sell at your ask price."""
+            task_description = """Your task: Provide an updated analysis based on new information, then post your bid/ask prices.
+
+First, provide your updated analysis (2-3 sentences on any new information, how it changes your view):
+
+Then, set your bid/ask prices for success tokens:
+- Buy price: Maximum you'd pay per token (you profit if success probability > price/$100)
+- Sell price: Minimum you'd accept per token (you profit if you think success probability < price/$100)"""
+
+        if is_auction:
+            reply_format = """Reply with your analysis, then ONLY:
+<buy>$X.XX</buy>"""
+        else:
+            reply_format = """Reply with your analysis, then ONLY:
 <buy>$X.XX</buy>
 <sell>$Y.YY</sell>"""
+
+        prompt = f"""You are {agent.name}, a profit-maximizing AI agent trading prediction contracts. Today is {current_date}.
+
+MARKET RULES:
+- If the goal succeeds: each success token pays out $100
+- If the goal fails: each success token pays out $0
+- You trade tokens at market prices to maximize profit
+
+{market_context}
+
+{goal_context}
+
+{updates_context}
+
+{position_info}
+
+{prev_analysis_context}{task_description}
+
+{reply_format}"""
 
         agent_prompts.append((agent.id, agent.name, prompt))
 
@@ -855,6 +963,48 @@ def conduct_auction(goal_id: int, update_id: int = 0, num_agents: int = 3):
 
     print(f"=== Auction Complete for Goal #{goal_id} ===\n", flush=True)
 
+def resolve_goal_settlement(goal_id: int, outcome: str):
+    """
+    Settle all agent positions when goal is resolved.
+    outcome: "success" or "failure"
+
+    If success: longs win $100/token, shorts lose $100/token
+    If failure: shorts win $100/token, longs lose $100/token
+    """
+    print(f"\n=== Settling Goal #{goal_id} with outcome: {outcome} ===", flush=True)
+
+    agents = get_all_agents()
+
+    for agent in agents:
+        token_position = agent.token_holdings.get(str(goal_id), 0)
+
+        if token_position == 0:
+            continue  # Skip agents with no position
+
+        # Calculate P&L
+        if outcome == "success":
+            # Longs win, shorts lose
+            pnl = token_position * 100  # Positive for longs, negative for shorts
+        else:  # failure
+            # Shorts win, longs lose
+            pnl = -token_position * 100  # Negative for longs, positive for shorts
+
+        # Update agent cash
+        agent.cash_balance += pnl
+
+        # Zero out position
+        agent.token_holdings[str(goal_id)] = 0
+
+        # Save updated agent
+        save_agent(agent)
+
+        print(f"  Agent {agent.name} (ID {agent.id}):", flush=True)
+        print(f"    Position: {int(token_position)} tokens", flush=True)
+        print(f"    P&L: ${pnl:.2f}", flush=True)
+        print(f"    New Cash: ${agent.cash_balance:.2f}", flush=True)
+
+    print(f"=== Goal #{goal_id} Settlement Complete ===\n", flush=True)
+
 def estimate_contract_base_price(goal_id: int):
     """Estimate base price for a goal by querying LLM 3 times asynchronously with context and averaging"""
     # Fetch goal details
@@ -993,6 +1143,32 @@ def get_goal_updates_endpoint(goal_id: int) -> List[GoalUpdate]:
         raise HTTPException(status_code=404, detail="Goal not found")
 
     return get_goal_updates(goal_id)
+
+@app.patch("/goals/{goal_id}/resolve")
+def resolve_goal(goal_id: int, request: ResolveGoalRequest) -> Goal:
+    """Resolve a goal with success or failure outcome and settle all agent positions"""
+    # Verify goal exists
+    goal = get_goal(goal_id)
+    if not goal:
+        raise HTTPException(status_code=404, detail="Goal not found")
+
+    # Validate outcome
+    if request.outcome not in ["success", "failure"]:
+        raise HTTPException(status_code=400, detail="Outcome must be 'success' or 'failure'")
+
+    # Check if already resolved
+    if goal.status == "resolved":
+        raise HTTPException(status_code=400, detail="Goal already resolved")
+
+    # Update goal
+    goal.status = "resolved"
+    goal.outcome = request.outcome
+    save_goal(goal)
+
+    # Settle all agent positions
+    resolve_goal_settlement(goal_id, request.outcome)
+
+    return goal
 
 @app.get("/goals/{goal_id}/updates/{update_id}/market-analysis")
 def get_market_analysis(goal_id: int, update_id: int) -> MarketAnalysis:
