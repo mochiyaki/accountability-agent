@@ -5,10 +5,20 @@ import re
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, field_validator
-from typing import List, Optional
+from pydantic import BaseModel, field_validator, AfterValidator
+from typing import List, Optional, Annotated
 from datetime import datetime, date
 from openai import OpenAI
+
+def validate_iso_date(v: str) -> str:
+    """Validate that a string is a valid ISO format date (YYYY-MM-DD)"""
+    try:
+        datetime.fromisoformat(v).date()
+        return v
+    except (ValueError, TypeError):
+        raise ValueError("Date must be in ISO format (YYYY-MM-DD)")
+
+ISODate = Annotated[str, AfterValidator(validate_iso_date)]
 
 # Load environment variables
 load_dotenv()
@@ -43,7 +53,7 @@ llm_client = OpenAI(
 class Goal(BaseModel):
     id: Optional[int] = None
     description: str
-    target_date: str  # ISO format date string
+    target_date: ISODate
     created_at: Optional[str] = None
     status: Optional[str] = "active"  # active, resolved
     payout_amount: int = 100
@@ -54,7 +64,7 @@ class DailyTask(BaseModel):
     id: Optional[int] = None
     goal_id: int
     description: str
-    assigned_date: str  # ISO format date string
+    assigned_date: ISODate
     completed: bool = False
     created_at: Optional[str] = None
 
@@ -72,6 +82,13 @@ class Trade(BaseModel):
     tokens_exchanged: int
     created_at: Optional[str] = None
 
+class GoalUpdate(BaseModel):
+    id: Optional[int] = None
+    goal_id: int
+    content: str
+    date: ISODate
+    created_at: Optional[str] = None
+
 class CreateGoalRequest(BaseModel):
     goal: str
     measurement: str
@@ -86,6 +103,10 @@ class CreateGoalRequest(BaseModel):
             return v
         except ValueError:
             raise ValueError("Date must be in DD/MM/YYYY format")
+
+class CreateGoalUpdateRequest(BaseModel):
+    content: str
+    date: ISODate
 
 # Helper functions for Redis operations
 def get_next_id(key: str) -> int:
@@ -119,6 +140,32 @@ def save_goal(goal: Goal):
     """Save goal to Redis"""
     redis_client.set(f"goal:{goal.id}", json.dumps(goal.model_dump()))
     redis_client.sadd("goals:all", goal.id)
+
+def get_goal_update(update_id: int) -> Optional[GoalUpdate]:
+    """Fetch goal update from Redis"""
+    data = redis_client.get(f"update:{update_id}")
+    if not data:
+        return None
+    return GoalUpdate(**json.loads(data))
+
+def save_goal_update(update: GoalUpdate):
+    """Save goal update to Redis"""
+    redis_client.set(f"update:{update.id}", json.dumps(update.model_dump()))
+    redis_client.sadd(f"goal:{update.goal_id}:updates", update.id)
+
+def get_goal_updates(goal_id: int) -> List[GoalUpdate]:
+    """Fetch all updates for a goal"""
+    update_ids = list(redis_client.smembers(f"goal:{goal_id}:updates") or [])  # type: ignore
+    if not update_ids:
+        return []
+
+    updates = []
+    for update_id in update_ids:
+        update = get_goal_update(int(update_id))
+        if update:
+            updates.append(update)
+
+    return sorted(updates, key=lambda u: u.created_at or "", reverse=True)
 
 def estimate_contract_base_price(goal_id: int):
     """Estimate base price for a goal by querying LLM 3 times with context and averaging"""
@@ -236,6 +283,39 @@ def get_goal_by_id(goal_id: int) -> Goal:
     if not goal:
         raise HTTPException(status_code=404, detail="Goal not found")
     return goal
+
+@app.post("/goals/{goal_id}/updates")
+def create_goal_update(goal_id: int, request: CreateGoalUpdateRequest) -> GoalUpdate:
+    """Submit an update for a goal"""
+    # Verify goal exists
+    goal = get_goal(goal_id)
+    if not goal:
+        raise HTTPException(status_code=404, detail="Goal not found")
+
+    # Create update
+    update_id = get_next_id("update:id")
+    update = GoalUpdate(
+        id=update_id,
+        goal_id=goal_id,
+        content=request.content,
+        date=request.date,
+        created_at=serialize_datetime()
+    )
+
+    # Save update to Redis
+    save_goal_update(update)
+
+    return update
+
+@app.get("/goals/{goal_id}/updates")
+def get_goal_updates_endpoint(goal_id: int) -> List[GoalUpdate]:
+    """Retrieve all updates for a goal"""
+    # Verify goal exists
+    goal = get_goal(goal_id)
+    if not goal:
+        raise HTTPException(status_code=404, detail="Goal not found")
+
+    return get_goal_updates(goal_id)
 
 if __name__ == "__main__":
     import uvicorn
