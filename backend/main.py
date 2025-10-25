@@ -178,7 +178,7 @@ def save_goal(goal: Goal):
     goal_data = json.dumps(goal.model_dump())
     redis_client.set(f"goal:{goal.id}", goal_data)
     redis_client.sadd("goals:all", goal.id)
-    print(f"Saved goal {goal.id} to Redis: {goal_data[:200]}", flush=True)
+    print(f"Saved goal {goal.id} to Redis: {goal_data}", flush=True)
 
 def get_goal_update(update_id: int) -> Optional[GoalUpdate]:
     """Fetch goal update from Redis"""
@@ -246,6 +246,29 @@ def get_agent_spreads_from_redis(goal_id: int, update_id: int) -> List[AgentSpre
         return []
     spreads_data = json.loads(data)
     return [AgentSpread(**spread) for spread in spreads_data]
+
+def save_agent_history_entry(agent_id: int, goal_id: int, update_id: int, spread: AgentSpread, market_price: Optional[float]):
+    """Save agent's prediction to their history for future reference"""
+    history_entry = {
+        "goal_id": goal_id,
+        "update_id": update_id,
+        "buy_price": spread.buy_price,
+        "sell_price": spread.sell_price,
+        "market_price": market_price,
+        "timestamp": serialize_datetime()
+    }
+    key = f"agent:{agent_id}:history"
+    redis_client.rpush(key, json.dumps(history_entry))
+    market_formatted = f"${market_price:.2f}" if market_price else "N/A"
+    print(f"  Saved history for Agent {agent_id}: Goal #{goal_id}, predicted ${spread.buy_price:.2f}, market was {market_formatted}", flush=True)
+
+def get_agent_history(agent_id: int, limit: int = 5) -> List[dict]:
+    """Retrieve agent's last N history entries"""
+    key = f"agent:{agent_id}:history"
+    history_raw = redis_client.lrange(key, -limit, -1)  # Get last 'limit' entries
+    if not history_raw:
+        return []
+    return [json.loads(entry) for entry in history_raw]
 
 def get_trades_for_update(goal_id: int, update_id: int) -> List[Trade]:
     """Retrieve trades executed for a specific goal update"""
@@ -526,79 +549,116 @@ def _call_llm_for_price(prompt: str) -> Optional[float]:
 
     return None
 
-def conduct_debate_round(goal_id: int, update_id: int, round_number: int, agents: List[Agent]) -> List[DebateMessage]:
-    """
-    Conduct a single round of debate where agents analyze and respond.
+def _process_agent_analysis(agent_id: int, agent_name: str, goal_id: int, update_id: int, prompt: str) -> tuple[Optional[DebateMessage], Optional[AgentSpread]]:
+    """Helper function to process a single agent's analysis and pricing."""
+    response = send_openrouter([{"role": "user", "content": prompt}])
 
-    Round 1: Independent analysis of the goal
-    Round 2: Agents see previous round and respond
+    if not response:
+        return None, None
+
+    # Extract and store the full debate message
+    store_debate_message(goal_id, update_id, agent_id, 1, response)
+    debate_msg = DebateMessage(
+        agent_id=agent_id,
+        round_number=1,
+        content=response,
+        timestamp=serialize_datetime()
+    )
+
+    # Extract bid/ask prices from the response
+    buy_match = re.search(r'<buy>\$?([\d.]+)</buy>', response)
+    sell_match = re.search(r'<sell>\$?([\d.]+)</sell>', response)
+
+    spread = None
+    if buy_match and sell_match:
+        buy_price = float(buy_match.group(1))
+        sell_price = float(sell_match.group(1))
+        spread = AgentSpread(
+            agent_id=agent_id,
+            buy_price=buy_price,
+            sell_price=sell_price
+        )
+
+    return debate_msg, spread
+
+def conduct_debate_round(goal_id: int, update_id: int, agents: List[Agent]) -> tuple[List[DebateMessage], List[AgentSpread]]:
+    """
+    Conduct debate and pricing in a single round (concurrent).
+    Each agent analyzes the goal and provides their bid/ask prices in one API call.
+    All agents run in parallel.
+    Returns: (debate_messages, spreads)
     """
     goal = get_goal(goal_id)
     updates = get_goal_updates(goal_id)
 
     if not goal:
-        return []
+        return [], []
 
     # Build context for agents
     goal_context = f"Goal #{goal_id}: {goal.description}\nTarget Date: {goal.target_date}"
 
-    # Build update history
+    # Build update history (all updates, no truncation)
     updates_context = ""
     if updates:
-        updates_context = "Recent Updates:\n"
-        for update in updates[:5]:  # Last 5 updates for context
+        updates_context = "Goal Progress Updates:\n"
+        for update in updates:  # All updates for complete context
             updates_context += f"- {update.date}: {update.content}\n"
+        updates_context += "\n"
 
-    # Build previous round context
-    prev_round_context = ""
-    if round_number > 1:
-        prev_messages = get_debate_by_round(goal_id, update_id, round_number - 1)
-        if prev_messages:
-            prev_round_context = "\nPrevious Round Analysis:\n"
-            for msg in prev_messages:
-                agent = get_agent(msg.agent_id)
-                agent_name = agent.name if agent else f"Agent {msg.agent_id}"
-                prev_round_context += f"- {agent_name}: {msg.content}\n"
-
-    # Each agent generates their analysis
-    messages_this_round = []
+    # Build prompts for all agents
+    agent_prompts = []
     for agent in agents:
+        # Get agent's history for context
+        agent_history = get_agent_history(agent.id, limit=5)
+        history_context = ""
+        if agent_history:
+            history_context = "Your recent prediction history:\n"
+            for i, entry in enumerate(agent_history, 1):
+                goal_ref = f"Goal #{entry['goal_id']}"
+                pred_range = f"${entry['buy_price']:.2f}-${entry['sell_price']:.2f}"
+                market = f"${entry['market_price']:.2f}" if entry['market_price'] else "pending"
+                history_context += f"  {i}. {goal_ref}: You predicted {pred_range}, market price was {market}\n"
+            history_context += "\n"
+
         # Get agent's previous analysis if exists
         agent_prev_analysis = agent.analyses.get(str(goal_id), "")
-        prev_analysis_context = f"Your previous analysis: {agent_prev_analysis}\n" if agent_prev_analysis else ""
+        prev_analysis_context = f"Your previous analysis on this goal: {agent_prev_analysis}\n\n" if agent_prev_analysis else ""
 
-        if round_number == 1:
-            prompt = f"""You are {agent.name}, an AI analyzing a goal for a prediction market.
-
-{goal_context}
-{updates_context}
-
-Your task: Provide an independent analysis of whether this goal will be achieved.
-{prev_analysis_context}
-Focus on: probability of success, key risks, time remaining, and confidence level.
-Be concise (2-3 sentences)."""
-        else:
-            prompt = f"""You are {agent.name}. Based on the previous round of analysis:
+        prompt = f"""You are {agent.name}, an AI analyzing a goal for a prediction market.
 
 {goal_context}
-{prev_round_context}
 
-Now provide your response. Do you agree, disagree, or have new insights?
-Consider their arguments and state your updated view on success probability.
-Be concise (2-3 sentences)."""
+{updates_context}{history_context}{prev_analysis_context}Your task: Provide an independent analysis of whether this goal will be achieved, then post your bid/ask prices.
 
-        response = send_openrouter([{"role": "user", "content": prompt}])
+First, provide your analysis (2-3 sentences on probability of success, key risks, time remaining).
 
-        if response:
-            store_debate_message(goal_id, update_id, agent.id, round_number, response)
-            messages_this_round.append(DebateMessage(
-                agent_id=agent.id,
-                round_number=round_number,
-                content=response,
-                timestamp=serialize_datetime()
-            ))
+Then, based on your analysis, provide your bid/ask prices for success tokens:
+- Buy price: Maximum you'd pay per token (probability * $100)
+- Sell price: Minimum you'd accept per token
 
-    return messages_this_round
+Reply with your analysis, then ONLY:
+<buy>$X.XX</buy>
+<sell>$Y.YY</sell>"""
+
+        agent_prompts.append((agent.id, agent.name, prompt))
+
+    # Run all agent analyses concurrently
+    debate_messages = []
+    spreads = []
+
+    with ThreadPoolExecutor(max_workers=len(agents)) as executor:
+        futures = [
+            executor.submit(_process_agent_analysis, agent_id, agent_name, goal_id, update_id, prompt)
+            for agent_id, agent_name, prompt in agent_prompts
+        ]
+        for future in futures:
+            debate_msg, spread = future.result()
+            if debate_msg:
+                debate_messages.append(debate_msg)
+            if spread:
+                spreads.append(spread)
+
+    return debate_messages, spreads
 
 def get_agent_spreads(goal_id: int, update_id: int, agents: List[Agent]) -> List[AgentSpread]:
     """
@@ -623,12 +683,45 @@ def get_agent_spreads(goal_id: int, update_id: int, agents: List[Agent]) -> List
         agent_name = agent.name if agent else f"Agent {msg.agent_id}"
         debate_summary += f"Round {msg.round_number} - {agent_name}: {msg.content}\n"
 
+    # Build update history (all updates, no truncation)
+    updates = get_goal_updates(goal_id)
+    update_history = ""
+    if updates:
+        update_history = "Goal Progress Updates:\n"
+        for update in updates:
+            update_history += f"- {update.date}: {update.content}\n"
+        update_history += "\n"
+
+    # Get the relevant date: update date if this is an update, otherwise today
+    if update_id == 0:
+        current_date = datetime.now().date().isoformat()
+    else:
+        update = get_goal_update(update_id)
+        current_date = update.date if update else datetime.now().date().isoformat()
+
     for agent in agents:
-        prompt = f"""You are {agent.name}. After the following debate about a goal:
+        # Get agent's history for context
+        agent_history = get_agent_history(agent.id, limit=5)
+        history_context = ""
+        if agent_history:
+            history_context = "Your recent prediction history:\n"
+            for i, entry in enumerate(agent_history, 1):
+                goal_ref = f"Goal #{entry['goal_id']}"
+                pred_range = f"${entry['buy_price']:.2f}-${entry['sell_price']:.2f}"
+                market = f"${entry['market_price']:.2f}" if entry['market_price'] else "pending"
+                history_context += f"  {i}. {goal_ref}: You predicted {pred_range}, market price was {market}\n"
+            history_context += "\n"
+
+        # Get agent's previous analysis if exists
+        agent_prev_analysis = agent.analyses.get(str(goal_id), "")
+        prev_analysis_context = f"Your previous analysis on this goal: {agent_prev_analysis}\n\n" if agent_prev_analysis else ""
+
+        prompt = f"""You are {agent.name}. Today is {current_date}. After the following debate about a goal:
 
 Goal: {goal.description}
+Target Date: {goal.target_date}
 
-{debate_summary}
+{update_history}{history_context}{prev_analysis_context}{debate_summary}
 
 Based on this discussion, what are your bid/ask prices for success tokens?
 
@@ -657,16 +750,15 @@ Reply with ONLY:
 
     return spreads
 
-def conduct_auction(goal_id: int, update_id: int = 0, num_agents: int = 3, num_rounds: int = 2):
+def conduct_auction(goal_id: int, update_id: int = 0, num_agents: int = 3):
     """
     Conduct a full market auction for a goal.
-    Orchestrates: debate → spread generation → order matching → settlement
+    Orchestrates: single-round debate with pricing → order matching → settlement
 
     Args:
         goal_id: Goal being auctioned
         update_id: Market event ID (0 for initial goal creation, >0 for updates)
         num_agents: How many agents to use (default 3)
-        num_rounds: How many debate rounds (default 2)
     """
     goal = get_goal(goal_id)
     if not goal:
@@ -706,15 +798,9 @@ def conduct_auction(goal_id: int, update_id: int = 0, num_agents: int = 3, num_r
     if update_id == 0:
         initialize_goal_tokens(goal_id, 100)
 
-    # Debate rounds
-    print(f"Starting debate with {len(agents)} agents for {num_rounds} rounds...", flush=True)
-    for round_num in range(1, num_rounds + 1):
-        print(f"  Round {round_num}...", flush=True)
-        conduct_debate_round(goal_id, update_id, round_num, agents)
-
-    # Get spreads from agents
-    print("Collecting agent spreads...", flush=True)
-    spreads = get_agent_spreads(goal_id, update_id, agents)
+    # Single debate round with pricing
+    print(f"Starting debate and pricing with {len(agents)} agents...", flush=True)
+    debate_messages, spreads = conduct_debate_round(goal_id, update_id, agents)
 
     if not spreads:
         print("No spreads generated, auction failed", flush=True)
@@ -760,6 +846,12 @@ def conduct_auction(goal_id: int, update_id: int = 0, num_agents: int = 3, num_r
             goal_obj.base_price = market_price
             save_goal(goal_obj)
             print(f"Updated goal {goal_id} base_price to ${market_price:.2f}", flush=True)
+
+    # Save agent predictions to history
+    print("Saving agent prediction history...", flush=True)
+    spreads = get_agent_spreads_from_redis(goal_id, update_id)
+    for spread in spreads:
+        save_agent_history_entry(spread.agent_id, goal_id, update_id, spread, market_price)
 
     print(f"=== Auction Complete for Goal #{goal_id} ===\n", flush=True)
 
@@ -835,7 +927,7 @@ def create_goal(request: CreateGoalRequest, background_tasks: BackgroundTasks) -
     save_goal(goal)
 
     # Trigger market auction for goal creation (treat as update_id=0)
-    background_tasks.add_task(conduct_auction, goal_id, 0, 3, 2)
+    background_tasks.add_task(conduct_auction, goal_id, 0, 3)
 
     return goal
 
@@ -888,7 +980,7 @@ def create_goal_update(goal_id: int, request: CreateGoalUpdateRequest, backgroun
     save_goal_update(update)
 
     # Trigger market auction for goal update
-    background_tasks.add_task(conduct_auction, goal_id, update_id, 3, 2)
+    background_tasks.add_task(conduct_auction, goal_id, update_id, 3)
 
     return update
 
