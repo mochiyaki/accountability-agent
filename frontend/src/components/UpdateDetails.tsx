@@ -186,7 +186,7 @@ export default function UpdateDetails({ apiBase, goal, initialUpdates, onGoalUpd
                 Pending LLM pricing...
               </span>
             ) : (
-              <span>${goal.base_price.toFixed(2)}</span>
+              <span>${analysis?.market_price != null?analysis.market_price.toFixed(2):goal.base_price.toFixed(2)}</span>
             )}
           </div>
         </div>
