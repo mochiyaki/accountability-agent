@@ -1170,6 +1170,46 @@ def resolve_goal(goal_id: int, request: ResolveGoalRequest) -> Goal:
 
     return goal
 
+@app.get("/goals/{goal_id}/prices")
+def get_goal_prices(goal_id: int) -> List[list]:
+    """
+    Retrieve historical prices for a goal.
+    Returns array of [date (YYYY-MM-DD), price ($)] for each market event.
+    Includes the initial goal creation price and all update prices.
+    """
+    # Verify goal exists
+    goal = get_goal(goal_id)
+    if not goal:
+        raise HTTPException(status_code=404, detail="Goal not found")
+
+    prices = []
+
+    # Get initial creation price (update_id=0)
+    initial_trades = get_trades_for_update(goal_id, 0)
+    if initial_trades:
+        initial_prices = [trade.price_per_token for trade in initial_trades]
+        if initial_prices:
+            initial_market_price = sum(initial_prices) / len(initial_prices)
+            # Use created_at date, but extract just the date part (YYYY-MM-DD)
+            created_date = goal.created_at.split("T")[0] if goal.created_at else ""
+            if created_date:
+                prices.append([created_date, round(initial_market_price, 2)])
+
+    # Get prices for each update
+    updates = get_goal_updates(goal_id)
+    for update in updates:
+        update_trades = get_trades_for_update(goal_id, update.id)
+        if update_trades:
+            trade_prices = [trade.price_per_token for trade in update_trades]
+            if trade_prices:
+                market_price = sum(trade_prices) / len(trade_prices)
+                prices.append([update.date, round(market_price, 2)])
+
+    # Sort by date ascending
+    prices.sort(key=lambda x: x[0])
+
+    return prices
+
 @app.get("/goals/{goal_id}/updates/{update_id}/market-analysis")
 def get_market_analysis(goal_id: int, update_id: int) -> MarketAnalysis:
     """
