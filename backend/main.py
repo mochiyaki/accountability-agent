@@ -98,6 +98,16 @@ class GoalUpdate(BaseModel):
     date: ISODate
     created_at: Optional[str] = None
 
+class MarketAnalysis(BaseModel):
+    """Complete LLM thinking for a goal update"""
+    update_id: int
+    update_content: str
+    update_date: str
+    debate_messages: List[DebateMessage]
+    agent_spreads: List[AgentSpread]
+    trades: List[dict]  # List of executed trades
+    market_price: Optional[float] = None
+
 class CreateGoalRequest(BaseModel):
     goal: str
     measurement: str
@@ -223,6 +233,31 @@ def get_debate_by_round(goal_id: int, update_id: int, round_number: int) -> List
     all_messages = get_debate_messages(goal_id, update_id)
     return [msg for msg in all_messages if msg.round_number == round_number]
 
+def store_agent_spreads(goal_id: int, update_id: int, spreads: List[AgentSpread]):
+    """Store agent spreads to Redis for a goal update"""
+    spreads_data = [spread.model_dump() for spread in spreads]
+    redis_client.set(f"spreads:{goal_id}:{update_id}", json.dumps(spreads_data))
+    print(f"Stored {len(spreads)} spreads for goal:{goal_id}:update:{update_id}", flush=True)
+
+def get_agent_spreads_from_redis(goal_id: int, update_id: int) -> List[AgentSpread]:
+    """Retrieve stored agent spreads from Redis"""
+    data = redis_client.get(f"spreads:{goal_id}:{update_id}")
+    if not data:
+        return []
+    spreads_data = json.loads(data)
+    return [AgentSpread(**spread) for spread in spreads_data]
+
+def get_trades_for_update(goal_id: int, update_id: int) -> List[Trade]:
+    """Retrieve trades executed for a specific goal update"""
+    trade_ids = list(redis_client.smembers(f"goal:{goal_id}:update:{update_id}:trades") or [])  # type: ignore
+    trades = []
+    for trade_id in trade_ids:
+        data = redis_client.get(f"trade:{int(trade_id)}")
+        if data:
+            trade = Trade(**json.loads(data))
+            trades.append(trade)
+    return sorted(trades, key=lambda t: t.id)
+
 def initialize_goal_tokens(goal_id: int, token_supply: int = 100):
     """Initialize token supply for a goal (100 tokens, all unowned initially)"""
     redis_client.set(f"goal:{goal_id}:token_supply", token_supply)
@@ -331,10 +366,11 @@ def auction_fallback(spreads: List[AgentSpread]) -> List[tuple]:
 
     return trades
 
-def settle_trades(goal_id: int, trades: List[tuple]):
+def settle_trades(goal_id: int, trades: List[tuple], update_id: int = 0):
     """
     Settle trades by updating agent cash and token holdings in Redis.
     trades: list of (buyer_agent_id, seller_agent_id, price_per_token, quantity)
+    update_id: Market event ID (0 for initial auction, >0 for updates)
     """
     for buyer_id, seller_id, price, qty in trades:
         buyer = get_agent(buyer_id)
@@ -381,6 +417,7 @@ def settle_trades(goal_id: int, trades: List[tuple]):
         )
         redis_client.set(f"trade:{trade_id}", json.dumps(trade.model_dump()))
         redis_client.sadd(f"goal:{goal_id}:trades", trade_id)
+        redis_client.sadd(f"goal:{goal_id}:update:{update_id}:trades", trade_id)
         print(f"    Trade recorded in Redis (ID: {trade_id})")
 
 def send_openrouter(
@@ -683,6 +720,9 @@ def conduct_auction(goal_id: int, update_id: int = 0, num_agents: int = 3, num_r
         print("No spreads generated, auction failed", flush=True)
         return
 
+    # Store spreads to Redis
+    store_agent_spreads(goal_id, update_id, spreads)
+
     print(f"Received {len(spreads)} spreads from agents", flush=True)
     for spread in spreads:
         print(f"  Agent {spread.agent_id}: buy=${spread.buy_price:.2f}, sell=${spread.sell_price:.2f}", flush=True)
@@ -702,7 +742,7 @@ def conduct_auction(goal_id: int, update_id: int = 0, num_agents: int = 3, num_r
     market_price = None
     if trades:
         print("Settling trades...", flush=True)
-        settle_trades(goal_id, trades)
+        settle_trades(goal_id, trades, update_id)
         print("Trades settled successfully", flush=True)
 
         # Calculate market price from executed trades
@@ -861,6 +901,59 @@ def get_goal_updates_endpoint(goal_id: int) -> List[GoalUpdate]:
         raise HTTPException(status_code=404, detail="Goal not found")
 
     return get_goal_updates(goal_id)
+
+@app.get("/goals/{goal_id}/updates/{update_id}/market-analysis")
+def get_market_analysis(goal_id: int, update_id: int) -> MarketAnalysis:
+    """
+    Retrieve complete LLM thinking and market analysis for a goal update.
+    Returns: debate messages, agent spreads, executed trades, and discovered market price.
+    """
+    # Verify goal exists
+    goal = get_goal(goal_id)
+    if not goal:
+        raise HTTPException(status_code=404, detail="Goal not found")
+
+    # Get the update
+    update = get_goal_update(update_id)
+    if not update or update.goal_id != goal_id:
+        raise HTTPException(status_code=404, detail="Update not found")
+
+    # Retrieve all market data
+    debate_messages = get_debate_messages(goal_id, update_id)
+    spreads = get_agent_spreads_from_redis(goal_id, update_id)
+    trades = get_trades_for_update(goal_id, update_id)
+
+    # Calculate market price from trades
+    market_price = None
+    if trades:
+        prices = [trade.price_per_token for trade in trades]
+        if prices:
+            market_price = sum(prices) / len(prices)
+
+    # Build trade data with agent names
+    trades_with_names = []
+    for trade in trades:
+        buyer = get_agent(trade.buyer_agent_id)
+        seller = get_agent(trade.seller_agent_id)
+        trades_with_names.append({
+            "buyer_id": trade.buyer_agent_id,
+            "buyer_name": buyer.name if buyer else f"Agent {trade.buyer_agent_id}",
+            "seller_id": trade.seller_agent_id,
+            "seller_name": seller.name if seller else f"Agent {trade.seller_agent_id}",
+            "price": trade.price_per_token,
+            "quantity": trade.tokens_exchanged,
+            "timestamp": trade.created_at
+        })
+
+    return MarketAnalysis(
+        update_id=update_id,
+        update_content=update.content,
+        update_date=update.date,
+        debate_messages=debate_messages,
+        agent_spreads=spreads,
+        trades=trades_with_names,
+        market_price=market_price
+    )
 
 # Agent Endpoints
 @app.post("/agents")
