@@ -14,7 +14,7 @@ completion = client.chat.completions.create(
         "HTTP-Referer": "http://localhost:8000",
         "X-Title": "Accountability Agent",
     },
-    model="openai/gpt-5-nano",
+    model="z-ai/glm-4.5-air:free",
     messages=[
         {
             "role": "user",

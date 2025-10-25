@@ -1,12 +1,14 @@
 import json
 import redis
 import os
+import re
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, field_validator
 from typing import List, Optional
 from datetime import datetime, date
+from openai import OpenAI
 
 # Load environment variables
 load_dotenv()
@@ -29,6 +31,12 @@ redis_client = redis.Redis(
     username=os.getenv('REDIS_USERNAME'),
     password=os.getenv('REDIS_PASSWORD'),
     decode_responses=True
+)
+
+# OpenAI client for OpenRouter
+llm_client = OpenAI(
+    base_url="https://openrouter.ai/api/v1",
+    api_key=os.getenv("OPENROUTER_API_KEY"),
 )
 
 # Data models
@@ -58,6 +66,8 @@ class Contract(BaseModel):
     goal_id: int
     created_at: Optional[str] = None
     status: Optional[str] = "active"  # active, resolved
+    payout_amount: int = 100
+    outcome: Optional[str] = None  # success, failure, null if unresolved
 
 class Trade(BaseModel):
     id: Optional[int] = None
@@ -122,9 +132,81 @@ def save_contract(contract: Contract):
     redis_client.set(f"contract:{contract.id}", json.dumps(contract.model_dump()))
     redis_client.sadd("contracts:all", contract.id)
 
+def estimate_contract_base_price(contract_id: int):
+    """Estimate base price for a contract by querying LLM 3 times with context and averaging"""
+    # Fetch contract and goal details
+    contract = get_contract(contract_id)
+    if not contract:
+        print(f"Contract {contract_id} not found")
+        return
+
+    goal = get_goal(contract.goal_id)
+    if not goal:
+        print(f"Goal {contract.goal_id} not found")
+        return
+
+    # Calculate days left
+    target_date = datetime.fromisoformat(goal.target_date)
+    today = datetime.now().date()
+    days_left = (target_date.date() - today).days
+
+    # Create detailed prompt with context
+    prompt = f"""You are pricing a prediction contract for an accountability agent system.
+
+SYSTEM: We run a service where AI agents trade binary prediction contracts on whether users will achieve their goals. The winner of each contract receives a $100 payout at the resolution date.
+
+USER'S GOAL: {goal.description}
+TARGET DATE: {goal.target_date}
+DAYS REMAINING: {days_left} days
+CONTRACT PAYOUT: $100 (winner takes all)
+
+Your task: Set a fair BASE PRICE for this contract (the initial price at which agents can enter the contract).
+
+Think through the following:
+1. What is the probability this goal will be achieved in {days_left} days?
+2. Based on that probability, what is the expected value for each side of the contract?
+3. What fair price balances both sides so neither has an obvious edge initially?
+4. Consider how difficult the goal is and how much time remains.
+
+Based on your analysis, what is a fair base price in USD for this contract?
+
+Reply with your chain of thought reasoning, then end with ONLY an XML tag with the price like this: <price>X.XX</price>"""
+
+    prices = []
+
+    for _ in range(3):
+        try:
+            completion = llm_client.chat.completions.create(
+                extra_headers={
+                    "HTTP-Referer": "http://localhost:8000",
+                    "X-Title": "Accountability Agent",
+                },
+                model="openai/gpt-5-mini",
+                messages=[
+                    {
+                        "role": "user",
+                        "content": prompt,
+                    }
+                ],
+            )
+
+            response = completion.choices[0].message.content
+            match = re.search(r'<price>([\d.]+)</price>', response)
+            if match:
+                price = float(match.group(1))
+                prices.append(price)
+                print(f"Estimated price: ${price}")
+        except Exception as e:
+            print(f"Error estimating price: {e}")
+
+    if prices:
+        average_price = sum(prices) / len(prices)
+        redis_client.set(f"contract:{contract_id}:base_price", json.dumps({"price": average_price, "days_left": days_left}))
+        print(f"Set base price for contract {contract_id}: ${average_price:.2f} (based on {len(prices)} estimates)")
+
 # Endpoints
 @app.post("/goals")
-def create_goal(request: CreateGoalRequest) -> dict:
+def create_goal(request: CreateGoalRequest, background_tasks: BackgroundTasks) -> dict:
     """Create a new goal with a target date in DD/MM/YYYY format and a contract"""
     # Convert DD/MM/YYYY to ISO format for storage
     target_date_obj = datetime.strptime(request.date, "%d/%m/%Y")
@@ -155,6 +237,9 @@ def create_goal(request: CreateGoalRequest) -> dict:
 
     # Save contract to Redis
     save_contract(contract)
+
+    # Estimate base price for contract in background
+    background_tasks.add_task(estimate_contract_base_price, contract_id)
 
     return {"goal": goal, "contract": contract}
 
