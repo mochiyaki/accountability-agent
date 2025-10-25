@@ -176,13 +176,17 @@ def _call_llm_for_price(prompt: str) -> Optional[float]:
             "https://openrouter.ai/api/v1/chat/completions",
             headers=headers,
             json={
-                "model": "deepseek/deepseek-r1",
+                "model": "moonshotai/kimi-k2-0905",
                 "messages": [
                     {
                         "role": "user",
                         "content": prompt,
                     }
                 ],
+                "provider": {
+                    "order": ["groq"],
+                    "allow_fallbacks": False,
+                },
             },
         )
 
