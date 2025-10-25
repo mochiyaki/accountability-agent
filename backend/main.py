@@ -162,8 +162,22 @@ def get_goal_updates(goal_id: int) -> List[GoalUpdate]:
 
     return sorted(updates, key=lambda u: u.created_at or "", reverse=True)
 
-def _call_llm_for_price(prompt: str) -> Optional[float]:
-    """Make a single LLM call to estimate price. Returns the price or None if extraction fails."""
+def send_openrouter(
+    messages: List[dict],
+    model: str = "moonshotai/kimi-k2-0905",
+    provider: Optional[dict] = None,
+) -> Optional[str]:
+    """
+    Send a request to OpenRouter API and return the message content.
+
+    Args:
+        messages: List of message dicts with 'role' and 'content' keys
+        model: Model to use (default: moonshotai/kimi-k2-0905)
+        provider: Optional provider config dict with 'order' and 'allow_fallbacks'
+
+    Returns:
+        The message content from the API response, or None if request fails
+    """
     try:
         headers = {
             "Authorization": f"Bearer {os.getenv('OPENROUTER_API_KEY')}",
@@ -172,34 +186,47 @@ def _call_llm_for_price(prompt: str) -> Optional[float]:
             "Content-Type": "application/json",
         }
 
+        payload = {
+            "model": model,
+            "messages": messages,
+        }
+
+        if provider:
+            payload["provider"] = provider
+
         response = requests.post(
             "https://openrouter.ai/api/v1/chat/completions",
             headers=headers,
-            json={
-                "model": "moonshotai/kimi-k2-0905",
-                "messages": [
-                    {
-                        "role": "user",
-                        "content": prompt,
-                    }
-                ],
-                "provider": {
-                    "order": ["groq"],
-                    "allow_fallbacks": False,
-                },
-            },
+            json=payload,
         )
 
         response.raise_for_status()
         data = response.json()
         message_content = data["choices"][0]["message"]["content"]
+        return message_content
+    except Exception as e:
+        print(f"Error calling OpenRouter: {e}")
+        return None
+
+
+def _call_llm_for_price(prompt: str) -> Optional[float]:
+    """Make a single LLM call to estimate price. Returns the price or None if extraction fails."""
+    provider_config = {
+        "order": ["groq"],
+        "allow_fallbacks": False,
+    }
+
+    message_content = send_openrouter(
+        messages=[{"role": "user", "content": prompt}],
+        provider=provider_config,
+    )
+
+    if message_content:
         match = re.search(r'<price>([\d.]+)</price>', message_content)
         if match:
             price = float(match.group(1))
             print(f"Estimated price: ${price}")
             return price
-    except Exception as e:
-        print(f"Error estimating price: {e}")
 
     return None
 
