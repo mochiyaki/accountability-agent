@@ -76,8 +76,20 @@ class Trade(BaseModel):
     goal_id: int
     buyer_agent_id: int
     seller_agent_id: int
-    tokens_exchanged: int
+    price_per_token: float
+    tokens_exchanged: float
     created_at: Optional[str] = None
+
+class DebateMessage(BaseModel):
+    agent_id: int
+    round_number: int
+    content: str
+    timestamp: str
+
+class AgentSpread(BaseModel):
+    agent_id: int
+    buy_price: float  # How much they'll pay per token
+    sell_price: float  # How much they want to receive per token
 
 class GoalUpdate(BaseModel):
     id: Optional[int] = None
@@ -182,6 +194,114 @@ def get_goal_updates(goal_id: int) -> List[GoalUpdate]:
 
     return sorted(updates, key=lambda u: u.created_at or "", reverse=True)
 
+# Market System Helper Functions
+
+def store_debate_message(goal_id: int, update_id: int, agent_id: int, round_number: int, content: str):
+    """Store a debate message in Redis"""
+    message = {
+        "agent_id": agent_id,
+        "round_number": round_number,
+        "content": content,
+        "timestamp": serialize_datetime(),
+    }
+    # Store as list of messages per debate
+    key = f"debate:{goal_id}:{update_id}"
+    redis_client.rpush(key, json.dumps(message))
+
+def get_debate_messages(goal_id: int, update_id: int) -> List[DebateMessage]:
+    """Fetch all debate messages for a goal/update"""
+    key = f"debate:{goal_id}:{update_id}"
+    messages_raw = redis_client.lrange(key, 0, -1)
+    if not messages_raw:
+        return []
+    return [DebateMessage(**json.loads(msg)) for msg in messages_raw]
+
+def get_debate_by_round(goal_id: int, update_id: int, round_number: int) -> List[DebateMessage]:
+    """Get all messages from a specific debate round"""
+    all_messages = get_debate_messages(goal_id, update_id)
+    return [msg for msg in all_messages if msg.round_number == round_number]
+
+def initialize_goal_tokens(goal_id: int, token_supply: int = 100):
+    """Initialize token supply for a goal (100 tokens, all unowned initially)"""
+    redis_client.set(f"goal:{goal_id}:token_supply", token_supply)
+
+def match_orders(spreads: List[AgentSpread]) -> List[tuple]:
+    """
+    Match buy and sell orders from agent spreads.
+    Returns list of (buyer_agent_id, seller_agent_id, price, quantity) tuples.
+
+    Algorithm:
+    - Sort buy prices: highest first (most bullish)
+    - Sort sell prices: lowest first (most bearish)
+    - Match where highest_buy >= lowest_sell at sell_price
+    """
+    if not spreads:
+        return []
+
+    # Sort buy orders (descending) and sell orders (ascending)
+    buy_orders = sorted(spreads, key=lambda s: s.buy_price, reverse=True)
+    sell_orders = sorted(spreads, key=lambda s: s.sell_price)
+
+    trades = []
+    buy_idx = 0
+    sell_idx = 0
+
+    while buy_idx < len(buy_orders) and sell_idx < len(sell_orders):
+        buyer = buy_orders[buy_idx]
+        seller = sell_orders[sell_idx]
+
+        # Check if there's overlap (willing to transact)
+        if buyer.buy_price >= seller.sell_price:
+            # Trade happens at sell price
+            trade = (buyer.agent_id, seller.agent_id, seller.sell_price, 1.0)
+            trades.append(trade)
+            buy_idx += 1
+            sell_idx += 1
+        else:
+            # No more matches possible
+            break
+
+    return trades
+
+def settle_trades(goal_id: int, trades: List[tuple]):
+    """
+    Settle trades by updating agent cash and token holdings.
+    trades: list of (buyer_agent_id, seller_agent_id, price_per_token, quantity)
+    """
+    for buyer_id, seller_id, price, qty in trades:
+        buyer = get_agent(buyer_id)
+        seller = get_agent(seller_id)
+
+        if not buyer or not seller:
+            continue
+
+        # Update cash balances
+        buyer.cash_balance -= price * qty
+        seller.cash_balance += price * qty
+
+        # Update token holdings
+        goal_id_str = str(goal_id)
+        buyer.token_holdings[goal_id_str] = buyer.token_holdings.get(goal_id_str, 0) + qty
+        seller.token_holdings[goal_id_str] = seller.token_holdings.get(goal_id_str, 0) - qty
+
+        # Save updated agents
+        save_agent(buyer)
+        save_agent(seller)
+
+        # Record the trade
+        trade_id = get_next_id("trade:id")
+        trade = Trade(
+            id=trade_id,
+            goal_id=goal_id,
+            buyer_agent_id=buyer_id,
+            seller_agent_id=seller_id,
+            price_per_token=price,
+            tokens_exchanged=qty,
+            created_at=serialize_datetime(),
+        )
+        redis_client.set(f"trade:{trade_id}", json.dumps(trade.model_dump()))
+        redis_client.sadd(f"goal:{goal_id}:trades", trade_id)
+
 def send_openrouter(
     messages: List[dict],
     model: str = "moonshotai/kimi-k2-0905",
@@ -249,6 +369,202 @@ def _call_llm_for_price(prompt: str) -> Optional[float]:
             return price
 
     return None
+
+def conduct_debate_round(goal_id: int, update_id: int, round_number: int, agents: List[Agent]) -> List[DebateMessage]:
+    """
+    Conduct a single round of debate where agents analyze and respond.
+
+    Round 1: Independent analysis of the goal
+    Round 2: Agents see previous round and respond
+    """
+    goal = get_goal(goal_id)
+    updates = get_goal_updates(goal_id)
+
+    if not goal:
+        return []
+
+    # Build context for agents
+    goal_context = f"Goal #{goal_id}: {goal.description}\nTarget Date: {goal.target_date}"
+
+    # Build update history
+    updates_context = ""
+    if updates:
+        updates_context = "Recent Updates:\n"
+        for update in updates[:5]:  # Last 5 updates for context
+            updates_context += f"- {update.date}: {update.content}\n"
+
+    # Build previous round context
+    prev_round_context = ""
+    if round_number > 1:
+        prev_messages = get_debate_by_round(goal_id, update_id, round_number - 1)
+        if prev_messages:
+            prev_round_context = "\nPrevious Round Analysis:\n"
+            for msg in prev_messages:
+                agent = get_agent(msg.agent_id)
+                agent_name = agent.name if agent else f"Agent {msg.agent_id}"
+                prev_round_context += f"- {agent_name}: {msg.content[:200]}...\n"
+
+    # Each agent generates their analysis
+    messages_this_round = []
+    for agent in agents:
+        # Get agent's previous analysis if exists
+        agent_prev_analysis = agent.analyses.get(str(goal_id), "")
+        prev_analysis_context = f"Your previous analysis: {agent_prev_analysis}\n" if agent_prev_analysis else ""
+
+        if round_number == 1:
+            prompt = f"""You are {agent.name}, an AI analyzing a goal for a prediction market.
+
+{goal_context}
+{updates_context}
+
+Your task: Provide an independent analysis of whether this goal will be achieved.
+{prev_analysis_context}
+Focus on: probability of success, key risks, time remaining, and confidence level.
+Be concise (2-3 sentences)."""
+        else:
+            prompt = f"""You are {agent.name}. Based on the previous round of analysis:
+
+{goal_context}
+{prev_round_context}
+
+Now provide your response. Do you agree, disagree, or have new insights?
+Consider their arguments and state your updated view on success probability.
+Be concise (2-3 sentences)."""
+
+        response = send_openrouter([{"role": "user", "content": prompt}])
+
+        if response:
+            store_debate_message(goal_id, update_id, agent.id, round_number, response)
+            messages_this_round.append(DebateMessage(
+                agent_id=agent.id,
+                round_number=round_number,
+                content=response,
+                timestamp=serialize_datetime()
+            ))
+
+    return messages_this_round
+
+def get_agent_spreads(goal_id: int, update_id: int, agents: List[Agent]) -> List[AgentSpread]:
+    """
+    Get buy/sell price spreads from all agents based on debate history.
+    Each agent analyzes the full debate and posts their bid/ask spread.
+    """
+    debate_messages = get_debate_messages(goal_id, update_id)
+
+    if not debate_messages:
+        return []
+
+    spreads = []
+    goal = get_goal(goal_id)
+
+    if not goal:
+        return []
+
+    # Build debate summary
+    debate_summary = "Debate Summary:\n"
+    for msg in debate_messages:
+        agent = get_agent(msg.agent_id)
+        agent_name = agent.name if agent else f"Agent {msg.agent_id}"
+        debate_summary += f"Round {msg.round_number} - {agent_name}: {msg.content[:150]}...\n"
+
+    for agent in agents:
+        prompt = f"""You are {agent.name}. After the following debate about a goal:
+
+Goal: {goal.description}
+
+{debate_summary}
+
+Based on this discussion, what are your bid/ask prices for success tokens?
+
+Think about the debate points and estimate:
+- Buy price: Maximum you'd pay per token (probability * $100)
+- Sell price: Minimum you'd accept per token
+
+Reply with ONLY:
+<buy>$X.XX</buy>
+<sell>$Y.YY</sell>"""
+
+        response = send_openrouter([{"role": "user", "content": prompt}])
+
+        if response:
+            buy_match = re.search(r'<buy>\$?([\d.]+)</buy>', response)
+            sell_match = re.search(r'<sell>\$?([\d.]+)</sell>', response)
+
+            if buy_match and sell_match:
+                buy_price = float(buy_match.group(1))
+                sell_price = float(sell_match.group(1))
+                spreads.append(AgentSpread(
+                    agent_id=agent.id,
+                    buy_price=buy_price,
+                    sell_price=sell_price
+                ))
+
+    return spreads
+
+def conduct_auction(goal_id: int, update_id: int = 0, num_agents: int = 3, num_rounds: int = 2):
+    """
+    Conduct a full market auction for a goal.
+    Orchestrates: debate → spread generation → order matching → settlement
+
+    Args:
+        goal_id: Goal being auctioned
+        update_id: Market event ID (0 for initial goal creation, >0 for updates)
+        num_agents: How many agents to use (default 3)
+        num_rounds: How many debate rounds (default 2)
+    """
+    goal = get_goal(goal_id)
+    if not goal:
+        print(f"Goal {goal_id} not found")
+        return
+
+    print(f"\n=== Starting Auction for Goal #{goal_id} ===")
+
+    # Get all available agents (or create if needed)
+    all_agents = get_all_agents()
+    if len(all_agents) < num_agents:
+        print(f"Warning: Only {len(all_agents)} agents available, need {num_agents}")
+        agents = all_agents
+    else:
+        agents = all_agents[:num_agents]
+
+    if not agents:
+        print("No agents available for auction")
+        return
+
+    # Initialize token supply for this goal if first auction
+    if update_id == 0:
+        initialize_goal_tokens(goal_id, 100)
+
+    # Debate rounds
+    print(f"Starting debate with {len(agents)} agents for {num_rounds} rounds...")
+    for round_num in range(1, num_rounds + 1):
+        print(f"  Round {round_num}...")
+        conduct_debate_round(goal_id, update_id, round_num, agents)
+
+    # Get spreads from agents
+    print("Collecting agent spreads...")
+    spreads = get_agent_spreads(goal_id, update_id, agents)
+
+    if not spreads:
+        print("No spreads generated, auction failed")
+        return
+
+    print(f"Received {len(spreads)} spreads from agents")
+    for spread in spreads:
+        print(f"  Agent {spread.agent_id}: buy=${spread.buy_price:.2f}, sell=${spread.sell_price:.2f}")
+
+    # Order matching
+    print("Matching orders...")
+    trades = match_orders(spreads)
+    print(f"Found {len(trades)} trades to execute")
+
+    # Settlement
+    if trades:
+        print("Settling trades...")
+        settle_trades(goal_id, trades)
+        print("Trades settled successfully")
+
+    print(f"=== Auction Complete for Goal #{goal_id} ===\n")
 
 def estimate_contract_base_price(goal_id: int):
     """Estimate base price for a goal by querying LLM 3 times asynchronously with context and averaging"""
