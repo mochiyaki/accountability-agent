@@ -68,6 +68,7 @@ class Agent(BaseModel):
     name: str
     cash_balance: float = 1000.0  # Starting cash for trading
     token_holdings: dict = {}  # goal_id -> token_amount (can be negative for shorts)
+    analyses: dict = {}  # goal_id -> latest analysis summary (what they think about the goal)
     created_at: Optional[str] = None
 
 class Trade(BaseModel):
