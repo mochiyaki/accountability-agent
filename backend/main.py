@@ -66,7 +66,8 @@ class DailyTask(BaseModel):
 class Agent(BaseModel):
     id: Optional[int] = None
     name: str
-    token_balance: int = 100
+    cash_balance: float = 1000.0  # Starting cash for trading
+    token_holdings: dict = {}  # goal_id -> token_amount (can be negative for shorts)
     created_at: Optional[str] = None
 
 class Trade(BaseModel):
@@ -103,6 +104,10 @@ class CreateGoalUpdateRequest(BaseModel):
     content: str
     date: ISODate
 
+class CreateAgentRequest(BaseModel):
+    name: str
+    cash_balance: float = 1000.0
+
 # Helper functions for Redis operations
 def get_next_id(key: str) -> int:
     """Get next ID for a resource"""
@@ -130,6 +135,20 @@ def save_agent(agent: Agent):
     """Save agent to Redis"""
     redis_client.set(f"agent:{agent.id}", json.dumps(agent.model_dump()))
     redis_client.sadd("agents:all", agent.id)
+
+def get_all_agents() -> List[Agent]:
+    """Fetch all agents from Redis"""
+    agent_ids = list(redis_client.smembers("agents:all") or [])  # type: ignore
+    if not agent_ids:
+        return []
+
+    agents = []
+    for agent_id in agent_ids:
+        agent = get_agent(int(agent_id))
+        if agent:
+            agents.append(agent)
+
+    return sorted(agents, key=lambda a: a.id)
 
 def save_goal(goal: Goal):
     """Save goal to Redis"""
@@ -361,6 +380,35 @@ def get_goal_updates_endpoint(goal_id: int) -> List[GoalUpdate]:
         raise HTTPException(status_code=404, detail="Goal not found")
 
     return get_goal_updates(goal_id)
+
+# Agent Endpoints
+@app.post("/agents")
+def create_agent(request: CreateAgentRequest) -> Agent:
+    """Create a new agent with initial cash balance"""
+    agent_id = get_next_id("agent:id")
+    agent = Agent(
+        id=agent_id,
+        name=request.name,
+        cash_balance=request.cash_balance,
+        token_holdings={},
+        created_at=serialize_datetime()
+    )
+
+    save_agent(agent)
+    return agent
+
+@app.get("/agents")
+def list_agents() -> List[Agent]:
+    """Retrieve all agents"""
+    return get_all_agents()
+
+@app.get("/agents/{agent_id}")
+def get_agent_by_id(agent_id: int) -> Agent:
+    """Retrieve a specific agent by ID"""
+    agent = get_agent(agent_id)
+    if not agent:
+        raise HTTPException(status_code=404, detail="Agent not found")
+    return agent
 
 if __name__ == "__main__":
     import uvicorn
