@@ -2,6 +2,7 @@ import json
 import redis
 import os
 import re
+from concurrent.futures import ThreadPoolExecutor
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
@@ -167,8 +168,36 @@ def get_goal_updates(goal_id: int) -> List[GoalUpdate]:
 
     return sorted(updates, key=lambda u: u.created_at or "", reverse=True)
 
+def _call_llm_for_price(prompt: str) -> Optional[float]:
+    """Make a single LLM call to estimate price. Returns the price or None if extraction fails."""
+    try:
+        completion = llm_client.chat.completions.create(
+            extra_headers={
+                "HTTP-Referer": "http://localhost:8000",
+                "X-Title": "Accountability Agent",
+            },
+            model="openai/gpt-5-mini",
+            messages=[
+                {
+                    "role": "user",
+                    "content": prompt,
+                }
+            ],
+        )
+
+        response = completion.choices[0].message.content
+        match = re.search(r'<price>([\d.]+)</price>', response)
+        if match:
+            price = float(match.group(1))
+            print(f"Estimated price: ${price}")
+            return price
+    except Exception as e:
+        print(f"Error estimating price: {e}")
+
+    return None
+
 def estimate_contract_base_price(goal_id: int):
-    """Estimate base price for a goal by querying LLM 3 times with context and averaging"""
+    """Estimate base price for a goal by querying LLM 3 times asynchronously with context and averaging"""
     # Fetch goal details
     goal = get_goal(goal_id)
     if not goal:
@@ -202,32 +231,14 @@ Based on your analysis, what is a fair base price in USD for this contract?
 
 Reply with your chain of thought reasoning, then end with ONLY an XML tag with the price like this: <price>X.XX</price>"""
 
+    # Make 3 LLM calls in parallel using ThreadPoolExecutor
     prices = []
-
-    for _ in range(3):
-        try:
-            completion = llm_client.chat.completions.create(
-                extra_headers={
-                    "HTTP-Referer": "http://localhost:8000",
-                    "X-Title": "Accountability Agent",
-                },
-                model="openai/gpt-5-mini",
-                messages=[
-                    {
-                        "role": "user",
-                        "content": prompt,
-                    }
-                ],
-            )
-
-            response = completion.choices[0].message.content
-            match = re.search(r'<price>([\d.]+)</price>', response)
-            if match:
-                price = float(match.group(1))
-                prices.append(price)
-                print(f"Estimated price: ${price}")
-        except Exception as e:
-            print(f"Error estimating price: {e}")
+    with ThreadPoolExecutor(max_workers=3) as executor:
+        futures = [executor.submit(_call_llm_for_price, prompt) for _ in range(3)]
+        for future in futures:
+            result = future.result()
+            if result is not None:
+                prices.append(result)
 
     if prices:
         average_price = sum(prices) / len(prices)
