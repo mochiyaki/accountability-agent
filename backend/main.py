@@ -165,8 +165,10 @@ def get_all_agents() -> List[Agent]:
 
 def save_goal(goal: Goal):
     """Save goal to Redis"""
-    redis_client.set(f"goal:{goal.id}", json.dumps(goal.model_dump()))
+    goal_data = json.dumps(goal.model_dump())
+    redis_client.set(f"goal:{goal.id}", goal_data)
     redis_client.sadd("goals:all", goal.id)
+    print(f"Saved goal {goal.id} to Redis: {goal_data[:200]}", flush=True)
 
 def get_goal_update(update_id: int) -> Optional[GoalUpdate]:
     """Fetch goal update from Redis"""
@@ -800,7 +802,11 @@ def list_goals() -> List[Goal]:
 @app.get("/goals/{goal_id}")
 def get_goal_by_id(goal_id: int) -> Goal:
     """Retrieve a specific goal by ID"""
+    print(f"\n=== GET /goals/{goal_id} ===", flush=True)
+    data = redis_client.get(f"goal:{goal_id}")
+    print(f"Redis data for goal:{goal_id}: {data}", flush=True)
     goal = get_goal(goal_id)
+    print(f"Parsed goal: {goal}", flush=True)
     if not goal:
         raise HTTPException(status_code=404, detail="Goal not found")
     return goal
