@@ -1,7 +1,6 @@
 # Agent Accountable!
 - set the goal🎯, measure📏 and end time⌛
 - our lovely agents 🐷🐯🐻🐱🐮 will help you to track your progress and give you constructive comments and rewards!
-
 ![banner](./banner.png)
 
 ## Purpose
@@ -28,4 +27,4 @@ uvicorn main:app --reload --port 8000
 - Handles Creation Requests: When you submit a new goal, the backend validates it, creates it, and returns confirmation along with a new contract.
 
 ## In short
-It’s a simple, interactive system for setting goals, committing to them, and visually tracking your progress over time, all in one place.
+It’s a simple, interactive system for setting goals, committing to them, and visually tracking your progress over time, all in one place - Agent Accountable!
