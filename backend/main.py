@@ -319,12 +319,26 @@ def send_openrouter(
         The message content from the API response, or None if request fails
     """
     try:
+        print("\n" + "="*80)
+        print("OPENROUTER REQUEST")
+        print("="*80)
+        print(f"Model: {model}")
+        print(f"Provider: {provider}")
+        print(f"Number of messages: {len(messages)}")
+
         headers = {
             "Authorization": f"Bearer {os.getenv('OPENROUTER_API_KEY')}",
             "HTTP-Referer": "http://localhost:8000",
             "X-Title": "Accountability Agent",
             "Content-Type": "application/json",
         }
+
+        print("\nHeaders:")
+        for key, value in headers.items():
+            if key == "Authorization":
+                print(f"  {key}: Bearer [REDACTED]")
+            else:
+                print(f"  {key}: {value}")
 
         payload = {
             "model": model,
@@ -334,18 +348,49 @@ def send_openrouter(
         if provider:
             payload["provider"] = provider
 
+        print("\nPayload:")
+        print(f"  model: {payload['model']}")
+        if provider:
+            print(f"  provider: {payload['provider']}")
+        print(f"  messages:")
+        for i, msg in enumerate(payload['messages']):
+            print(f"    [{i}] role: {msg['role']}")
+            content = msg['content']
+            if len(content) > 200:
+                print(f"        content: {content[:200]}... (truncated, total length: {len(content)})")
+            else:
+                print(f"        content: {content}")
+
+        print("\nSending to: https://openrouter.ai/api/v1/chat/completions")
+
         response = requests.post(
             "https://openrouter.ai/api/v1/chat/completions",
             headers=headers,
             json=payload,
         )
 
+        print(f"\nResponse Status: {response.status_code}")
         response.raise_for_status()
         data = response.json()
+
+        print("\nResponse Data:")
+        print(f"  Model: {data.get('model')}")
+        print(f"  Choices: {len(data.get('choices', []))}")
+        print(f"  Usage: {data.get('usage')}")
+
         message_content = data["choices"][0]["message"]["content"]
+
+        print(f"\nMessage Content:")
+        if len(message_content) > 300:
+            print(f"  {message_content[:300]}... (truncated, total length: {len(message_content)})")
+        else:
+            print(f"  {message_content}")
+
+        print("="*80 + "\n")
         return message_content
     except Exception as e:
-        print(f"Error calling OpenRouter: {e}")
+        print(f"\nError calling OpenRouter: {e}")
+        print("="*80 + "\n")
         return None
 
 
