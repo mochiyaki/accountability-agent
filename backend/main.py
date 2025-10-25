@@ -287,8 +287,8 @@ def auction_fallback(spreads: List[AgentSpread]) -> List[tuple]:
     if highest_buy >= lowest_sell:
         return []
 
-    print(f"  Spreads don't converge: highest_buy=${highest_buy:.2f} < lowest_sell=${lowest_sell:.2f}")
-    print(f"  Running auction fallback to discover clearing price...")
+    print(f"  Spreads don't converge: highest_buy=${highest_buy:.2f} < lowest_sell=${lowest_sell:.2f}", flush=True)
+    print(f"  Running auction fallback to discover clearing price...", flush=True)
 
     # Try prices from lowest_sell down to highest_buy in 5 cent increments
     best_price = None
@@ -310,10 +310,10 @@ def auction_fallback(spreads: List[AgentSpread]) -> List[tuple]:
         price -= 0.05
 
     if best_price is None or best_volume == 0:
-        print(f"  Could not find clearing price")
+        print(f"  Could not find clearing price", flush=True)
         return []
 
-    print(f"  Clearing price discovered: ${best_price:.2f} (volume: {best_volume} tokens)")
+    print(f"  Clearing price discovered: ${best_price:.2f} (volume: {best_volume} tokens)", flush=True)
 
     # Execute trades at clearing price
     buyers = sorted([s for s in spreads if s.buy_price >= best_price],
@@ -325,7 +325,7 @@ def auction_fallback(spreads: List[AgentSpread]) -> List[tuple]:
     for i in range(min(len(buyers), len(sellers))):
         trade = (buyers[i].agent_id, sellers[i].agent_id, best_price, 1.0)
         trades.append(trade)
-        print(f"    Agent {buyers[i].agent_id} buys from Agent {sellers[i].agent_id} @ ${best_price:.2f}")
+        print(f"    Agent {buyers[i].agent_id} buys from Agent {sellers[i].agent_id} @ ${best_price:.2f}", flush=True)
 
     return trades
 
@@ -398,12 +398,12 @@ def send_openrouter(
         The message content from the API response, or None if request fails
     """
     try:
-        print("\n" + "="*80)
-        print("OPENROUTER REQUEST")
-        print("="*80)
-        print(f"Model: {model}")
-        print(f"Provider: {provider}")
-        print(f"Number of messages: {len(messages)}")
+        print("\n" + "="*80, flush=True)
+        print("OPENROUTER REQUEST", flush=True)
+        print("="*80, flush=True)
+        print(f"Model: {model}", flush=True)
+        print(f"Provider: {provider}", flush=True)
+        print(f"Number of messages: {len(messages)}", flush=True)
 
         headers = {
             "Authorization": f"Bearer {os.getenv('OPENROUTER_API_KEY')}",
@@ -412,12 +412,12 @@ def send_openrouter(
             "Content-Type": "application/json",
         }
 
-        print("\nHeaders:")
+        print("\nHeaders:", flush=True)
         for key, value in headers.items():
             if key == "Authorization":
-                print(f"  {key}: Bearer [REDACTED]")
+                print(f"  {key}: Bearer [REDACTED]", flush=True)
             else:
-                print(f"  {key}: {value}")
+                print(f"  {key}: {value}", flush=True)
 
         payload = {
             "model": model,
@@ -427,16 +427,16 @@ def send_openrouter(
         if provider:
             payload["provider"] = provider
 
-        print("\nPayload:")
-        print(f"  model: {payload['model']}")
+        print("\nPayload:", flush=True)
+        print(f"  model: {payload['model']}", flush=True)
         if provider:
-            print(f"  provider: {payload['provider']}")
-        print(f"  messages:")
+            print(f"  provider: {payload['provider']}", flush=True)
+        print(f"  messages:", flush=True)
         for i, msg in enumerate(payload['messages']):
-            print(f"    [{i}] role: {msg['role']}")
-            print(f"        content: {msg['content']}")
+            print(f"    [{i}] role: {msg['role']}", flush=True)
+            print(f"        content: {msg['content']}", flush=True)
 
-        print("\nSending to: https://openrouter.ai/api/v1/chat/completions")
+        print("\nSending to: https://openrouter.ai/api/v1/chat/completions", flush=True)
 
         response = requests.post(
             "https://openrouter.ai/api/v1/chat/completions",
@@ -444,25 +444,25 @@ def send_openrouter(
             json=payload,
         )
 
-        print(f"\nResponse Status: {response.status_code}")
+        print(f"\nResponse Status: {response.status_code}", flush=True)
         response.raise_for_status()
         data = response.json()
 
-        print("\nResponse Data:")
-        print(f"  Model: {data.get('model')}")
-        print(f"  Choices: {len(data.get('choices', []))}")
-        print(f"  Usage: {data.get('usage')}")
+        print("\nResponse Data:", flush=True)
+        print(f"  Model: {data.get('model')}", flush=True)
+        print(f"  Choices: {len(data.get('choices', []))}", flush=True)
+        print(f"  Usage: {data.get('usage')}", flush=True)
 
         message_content = data["choices"][0]["message"]["content"]
 
-        print(f"\nMessage Content:")
-        print(f"  {message_content}")
+        print(f"\nMessage Content:", flush=True)
+        print(f"  {message_content}", flush=True)
 
-        print("="*80 + "\n")
+        print("="*80 + "\n", flush=True)
         return message_content
     except Exception as e:
-        print(f"\nError calling OpenRouter: {e}")
-        print("="*80 + "\n")
+        print(f"\nError calling OpenRouter: {e}", flush=True)
+        print("="*80 + "\n", flush=True)
         return None
 
 
@@ -634,13 +634,13 @@ def conduct_auction(goal_id: int, update_id: int = 0, num_agents: int = 3, num_r
         print(f"Goal {goal_id} not found")
         return
 
-    print(f"\n=== Starting Auction for Goal #{goal_id} ===")
+    print(f"\n=== Starting Auction for Goal #{goal_id} ===", flush=True)
 
     # Get all available agents (or create if needed)
     all_agents = get_all_agents()
     if len(all_agents) < num_agents:
         if len(all_agents) == 0:
-            print(f"No agents found. Creating {num_agents} default agents...")
+            print(f"No agents found. Creating {num_agents} default agents...", flush=True)
             agent_names = ["Alice", "Bob", "Charlie", "Diana", "Eve"]
             for i in range(num_agents):
                 agent_id = get_next_id("agent:id")
@@ -652,15 +652,15 @@ def conduct_auction(goal_id: int, update_id: int = 0, num_agents: int = 3, num_r
                     created_at=serialize_datetime()
                 )
                 save_agent(new_agent)
-                print(f"  Created Agent {agent_names[i]} (ID: {agent_id})")
+                print(f"  Created Agent {agent_names[i]} (ID: {agent_id})", flush=True)
             all_agents = get_all_agents()
         else:
-            print(f"Warning: Only {len(all_agents)} agents available, need {num_agents}")
+            print(f"Warning: Only {len(all_agents)} agents available, need {num_agents}", flush=True)
 
     agents = all_agents[:num_agents]
 
     if not agents:
-        print("Failed to create or find agents for auction")
+        print("Failed to create or find agents for auction", flush=True)
         return
 
     # Initialize token supply for this goal if first auction
@@ -668,43 +668,43 @@ def conduct_auction(goal_id: int, update_id: int = 0, num_agents: int = 3, num_r
         initialize_goal_tokens(goal_id, 100)
 
     # Debate rounds
-    print(f"Starting debate with {len(agents)} agents for {num_rounds} rounds...")
+    print(f"Starting debate with {len(agents)} agents for {num_rounds} rounds...", flush=True)
     for round_num in range(1, num_rounds + 1):
-        print(f"  Round {round_num}...")
+        print(f"  Round {round_num}...", flush=True)
         conduct_debate_round(goal_id, update_id, round_num, agents)
 
     # Get spreads from agents
-    print("Collecting agent spreads...")
+    print("Collecting agent spreads...", flush=True)
     spreads = get_agent_spreads(goal_id, update_id, agents)
 
     if not spreads:
-        print("No spreads generated, auction failed")
+        print("No spreads generated, auction failed", flush=True)
         return
 
-    print(f"Received {len(spreads)} spreads from agents")
+    print(f"Received {len(spreads)} spreads from agents", flush=True)
     for spread in spreads:
-        print(f"  Agent {spread.agent_id}: buy=${spread.buy_price:.2f}, sell=${spread.sell_price:.2f}")
+        print(f"  Agent {spread.agent_id}: buy=${spread.buy_price:.2f}, sell=${spread.sell_price:.2f}", flush=True)
 
     # Order matching
-    print("Matching orders...")
+    print("Matching orders...", flush=True)
     trades = match_orders(spreads)
-    print(f"Found {len(trades)} trades to execute")
+    print(f"Found {len(trades)} trades to execute", flush=True)
 
     # If no trades and this is round 0 (initial goal creation), use auction fallback
     if not trades and update_id == 0:
-        print("No trades converged. Running auction fallback for market seeding...")
+        print("No trades converged. Running auction fallback for market seeding...", flush=True)
         trades = auction_fallback(spreads)
-        print(f"Auction fallback produced {len(trades)} trades")
+        print(f"Auction fallback produced {len(trades)} trades", flush=True)
 
     # Settlement
     if trades:
-        print("Settling trades...")
+        print("Settling trades...", flush=True)
         settle_trades(goal_id, trades)
-        print("Trades settled successfully")
+        print("Trades settled successfully", flush=True)
     else:
-        print("No trades to settle")
+        print("No trades to settle", flush=True)
 
-    print(f"=== Auction Complete for Goal #{goal_id} ===\n")
+    print(f"=== Auction Complete for Goal #{goal_id} ===\n", flush=True)
 
 def estimate_contract_base_price(goal_id: int):
     """Estimate base price for a goal by querying LLM 3 times asynchronously with context and averaging"""
