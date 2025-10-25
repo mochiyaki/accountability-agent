@@ -1,6 +1,6 @@
 # Agent Accountable!
-- set the goal, measure and end time
-- the agent will help you to track your progress
+- set the goal🎯, measure📏 and end time⌛
+- our agents 🐷🐯🐻🐱🐮 will help you to track your progress and give you rewards!
 
 ## Purpose
 This program helps you `set personal goals, track your progress, and visualize how well you are doing over time`. Think of it as a combination of a digital journal, contract system, and progress tracker.
