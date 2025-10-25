@@ -178,7 +178,7 @@ export default function UpdateDetails({ apiBase, goal, initialUpdates, onGoalUpd
           <div className="mt-1 text-xs text-gray-400">Target: {new Date(goal.target_date).toLocaleDateString()}</div>
         </div>
         <div className="w-48 text-right">
-          <div className="text-xs text-gray-500">LLM Market Price</div>
+          {/* <div className="text-xs text-gray-500">LLM Market Price</div>
           <div className="mt-1 text-lg font-medium">
             {goal.base_price == null ? (
               <span className="inline-flex items-center gap-2 text-gray-500">
@@ -186,9 +186,9 @@ export default function UpdateDetails({ apiBase, goal, initialUpdates, onGoalUpd
                 Pending LLM pricing...
               </span>
             ) : (
-              <span>${analysis?.market_price != null?analysis.market_price.toFixed(2):goal.base_price.toFixed(2)}</span>
+              <span>${goal.base_price.toFixed(2)}</span>
             )}
-          </div>
+          </div> */}
         </div>
       </div>
 
@@ -359,3 +359,4 @@ export default function UpdateDetails({ apiBase, goal, initialUpdates, onGoalUpd
     return Array.from(byRound.entries()).sort((a, b) => a[0] - b[0]);
   }
 }
+
