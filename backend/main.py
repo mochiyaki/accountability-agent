@@ -567,13 +567,28 @@ def conduct_auction(goal_id: int, update_id: int = 0, num_agents: int = 3, num_r
     # Get all available agents (or create if needed)
     all_agents = get_all_agents()
     if len(all_agents) < num_agents:
-        print(f"Warning: Only {len(all_agents)} agents available, need {num_agents}")
-        agents = all_agents
-    else:
-        agents = all_agents[:num_agents]
+        if len(all_agents) == 0:
+            print(f"No agents found. Creating {num_agents} default agents...")
+            agent_names = ["Alice", "Bob", "Charlie", "Diana", "Eve"]
+            for i in range(num_agents):
+                agent_id = get_next_id("agent:id")
+                new_agent = Agent(
+                    id=agent_id,
+                    name=f"Agent {agent_names[i]}",
+                    cash_balance=1000.0,
+                    token_holdings={},
+                    created_at=serialize_datetime()
+                )
+                save_agent(new_agent)
+                print(f"  Created Agent {agent_names[i]} (ID: {agent_id})")
+            all_agents = get_all_agents()
+        else:
+            print(f"Warning: Only {len(all_agents)} agents available, need {num_agents}")
+
+    agents = all_agents[:num_agents]
 
     if not agents:
-        print("No agents available for auction")
+        print("Failed to create or find agents for auction")
         return
 
     # Initialize token supply for this goal if first auction
