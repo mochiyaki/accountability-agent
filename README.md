@@ -1,6 +1,6 @@
 # Agent Accountable!
 - set the goal🎯, measure📏 and end time⌛
-- our lovely agents 🐷🐯🐻🐱🐮 will help you to track your progress, give you constructive comments and rewards!
+- our lovely agents 🐷🐯🐻🐱🐮 will help you to track your progress and give you constructive comments and rewards!
 ![banner](./banner.png)
 
 ## Purpose
