@@ -265,7 +265,7 @@ def match_orders(spreads: List[AgentSpread]) -> List[tuple]:
 
 def settle_trades(goal_id: int, trades: List[tuple]):
     """
-    Settle trades by updating agent cash and token holdings.
+    Settle trades by updating agent cash and token holdings in Redis.
     trades: list of (buyer_agent_id, seller_agent_id, price_per_token, quantity)
     """
     for buyer_id, seller_id, price, qty in trades:
@@ -275,20 +275,32 @@ def settle_trades(goal_id: int, trades: List[tuple]):
         if not buyer or not seller:
             continue
 
+        # Calculate trade amount
+        trade_amount = price * qty
+
         # Update cash balances
-        buyer.cash_balance -= price * qty
-        seller.cash_balance += price * qty
+        buyer.cash_balance -= trade_amount
+        seller.cash_balance += trade_amount
 
         # Update token holdings
         goal_id_str = str(goal_id)
         buyer.token_holdings[goal_id_str] = buyer.token_holdings.get(goal_id_str, 0) + qty
         seller.token_holdings[goal_id_str] = seller.token_holdings.get(goal_id_str, 0) - qty
 
-        # Save updated agents
+        # Save updated agents to Redis
         save_agent(buyer)
         save_agent(seller)
 
-        # Record the trade
+        print(f"  Trade Settled:")
+        print(f"    Buyer: {buyer.name} (ID {buyer_id})")
+        print(f"      Cash: ${buyer.cash_balance:.2f}")
+        print(f"      Tokens for Goal #{goal_id}: {buyer.token_holdings.get(goal_id_str, 0)}")
+        print(f"    Seller: {seller.name} (ID {seller_id})")
+        print(f"      Cash: ${seller.cash_balance:.2f}")
+        print(f"      Tokens for Goal #{goal_id}: {seller.token_holdings.get(goal_id_str, 0)}")
+        print(f"    Amount: {qty} tokens @ ${price:.2f} = ${trade_amount:.2f}")
+
+        # Record the trade in Redis
         trade_id = get_next_id("trade:id")
         trade = Trade(
             id=trade_id,
@@ -301,6 +313,7 @@ def settle_trades(goal_id: int, trades: List[tuple]):
         )
         redis_client.set(f"trade:{trade_id}", json.dumps(trade.model_dump()))
         redis_client.sadd(f"goal:{goal_id}:trades", trade_id)
+        print(f"    Trade recorded in Redis (ID: {trade_id})")
 
 def send_openrouter(
     messages: List[dict],
@@ -355,11 +368,7 @@ def send_openrouter(
         print(f"  messages:")
         for i, msg in enumerate(payload['messages']):
             print(f"    [{i}] role: {msg['role']}")
-            content = msg['content']
-            if len(content) > 200:
-                print(f"        content: {content[:200]}... (truncated, total length: {len(content)})")
-            else:
-                print(f"        content: {content}")
+            print(f"        content: {msg['content']}")
 
         print("\nSending to: https://openrouter.ai/api/v1/chat/completions")
 
@@ -381,10 +390,7 @@ def send_openrouter(
         message_content = data["choices"][0]["message"]["content"]
 
         print(f"\nMessage Content:")
-        if len(message_content) > 300:
-            print(f"  {message_content[:300]}... (truncated, total length: {len(message_content)})")
-        else:
-            print(f"  {message_content}")
+        print(f"  {message_content}")
 
         print("="*80 + "\n")
         return message_content
