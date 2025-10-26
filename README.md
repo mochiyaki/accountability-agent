@@ -4,7 +4,9 @@
 
 ![banner](./banner.png)
 
-🎧 **agent-to-agent-discussion**<br><audio controls src="https://raw.githubusercontent.com/mochiyaki/accountability-agent/master/audio-output.wav"></audio>
+| Prompt | Audio Sample |
+|--------|---------------|
+|`[S1] This is an open weights text to dialogue model.`<br/>`[S2] You get full control over scripts and voices.`<br/>`[S1] Wow. Amazing. (laughs)`<br/>`[S2] Try it now on Git hub or Hugging Face.`<br/> |🎧 **agent-to-agent-discussion**<br><audio controls src="https://raw.githubusercontent.com/mochiyaki/accountability-agent/master/audio-output.wav"></audio> |
 
 ## Purpose
 This program helps you `set personal goals, track your progress, and visualize how well you are doing over time`. Think of it as a combination of a digital journal, contract system, and progress tracker.
