@@ -4,7 +4,7 @@
 
 ![banner](./banner.png)
 
-🎧 **agent-to-agent-discussion**<br><audio controls src="./audio-output.wav"></audio>
+🎧 **agent-to-agent-discussion**<br><audio controls src="https://raw.githubusercontent.com/mochiyaki/accountability-agent/master/audio-output.wav"></audio>
 
 ## Purpose
 This program helps you `set personal goals, track your progress, and visualize how well you are doing over time`. Think of it as a combination of a digital journal, contract system, and progress tracker.
