@@ -30,3 +30,5 @@ uvicorn main:app --reload --port 8000
 
 ## In short
 It’s a simple, interactive system for setting goals, committing to them, and visually tracking your progress over time, all in one place - Agent Accountable!
+
+![agents](./agents.svg)
